@@ -1,0 +1,26 @@
+# Ultralytics YOLO 🚀 FLAME2 Dataset Configuration
+# 适配RGB+IR 6通道输入的FLAME2数据集配置
+
+# 1. 数据集根路径
+path: FLAME2 # E:/Yan-Unifiles/lab/exp/yolov12/FLAME2
+
+# 2. 训练/验证/测试集划分
+train: train.txt
+val: val.txt
+
+# 3. 类别信息
+nc: 1  # 类别数量
+names:
+  0: flame
+
+# 4. 6通道输入配置（供数据加载器读取）
+input_channels: 6                 # 标记输入为RGB(3)+IR(3)共6通道
+rgb_dir: 254p RGB Images          # RGB图像，jpg格式
+thermal_dir: 254p Thermal Images  # IR热成像图像，jpg格式
+label_dir: yolo_labels            # YOLO格式标注文件，txt格式
+
+# 5. 图像尺寸
+img_size: [254, 254]
+
+# 6. 标注格式
+format: yolo  # YOLO格式（class_id x_center y_center width height）
