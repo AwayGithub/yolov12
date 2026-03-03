@@ -519,3 +519,292 @@ class ClassificationDataset:
             x["msgs"] = msgs  # warnings
             save_dataset_cache_file(self.prefix, path, x, DATASET_CACHE_VERSION)
             return samples
+
+class FLAME2Dataset(BaseDataset):
+    """
+    适配FLAME2数据集的6通道（RGB+IR）数据加载器
+    核心功能：
+    1. 加载RGB+IR双模态图像并拼接为6通道张量
+    2. 匹配YOLO格式标注文件
+    3. 兼容6通道数据的增强/预处理逻辑
+    """
+
+    def __init__(self, *args, data=None, task="detect", **kwargs):
+        """初始化FLAME2数据集加载器"""
+        self.use_segments = task == "segment"
+        self.use_keypoints = task == "pose"
+        self.use_obb = task == "obb"
+        self.data = data
+        # 6通道配置读取
+        self.input_channels = data.get("input_channels", 6)
+        self.rgb_dir = Path(data["path"]) / data["rgb_dir"]
+        self.thermal_dir = Path(data["path"]) / data["thermal_dir"]
+        self.label_dir = Path(data["path"]) / data["label_dir"]
+        self.img_size = data.get("img_size", [254, 254])
+        
+        assert not (self.use_segments and self.use_keypoints), "Can not use both segments and keypoints."
+        assert self.input_channels == 6, "FLAME2数据集仅支持6通道(RGB+IR)输入"
+        super().__init__(*args, **kwargs)
+
+    def get_image_and_label(self, index):
+        """重载：获取单样本的6通道图像+标注"""
+        # 1. 读取文件名（从im_files中获取RGB文件名）
+        rgb_file = Path(self.im_files[index])
+        # 2. 匹配IR图像文件（替换目录+保持文件名一致）
+        thermal_file = self.thermal_dir / rgb_file.name
+        # 3. 匹配标注文件（替换后缀为txt）
+        label_file = self.label_dir / rgb_file.with_suffix(".txt").name
+
+        # 4. 加载RGB+IR图像（均为3通道）
+        rgb_img = self.load_image(rgb_file)  # (H,W,3)
+        thermal_img = self.load_image(thermal_file)  # (H,W,3)
+        # 5. 拼接为6通道图像 (H,W,6)
+        img = np.concatenate([rgb_img, thermal_img], axis=-1)
+
+        # 6. 加载标注
+        label = self.load_label(label_file)
+
+        return {"img": img, "label": label, "im_file": str(rgb_file), "thermal_file": str(thermal_file)}
+
+    def load_image(self, img_path):
+        """加载单模态图像（RGB/IR），返回HWC格式numpy数组"""
+        if not img_path.exists():
+            raise FileNotFoundError(f"图像文件不存在: {img_path}")
+        img = cv2.imread(str(img_path))
+        if img is None:
+            raise ValueError(f"无法读取图像: {img_path}")
+        # 转为RGB格式（cv2默认BGR）
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        # 调整尺寸（与配置一致）
+        img = cv2.resize(img, (self.img_size[1], self.img_size[0]))
+        return img
+
+    def load_label(self, label_file):
+        """加载YOLO格式标注"""
+        if not label_file.exists():
+            return np.zeros((0, 5), dtype=np.float32)  # 无标注返回空
+        with open(label_file, "r") as f:
+            lines = f.read().splitlines()
+        labels = []
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            # YOLO格式：class_id x_center y_center width height
+            parts = line.split()
+            cls = int(parts[0])
+            bbox = np.array(parts[1:5], dtype=np.float32)
+            labels.append([cls, *bbox])
+        return np.array(labels, dtype=np.float32)
+
+    def cache_labels(self, path=Path("./labels.cache")):
+        """
+        重载缓存逻辑：适配6通道数据的标签缓存
+        """
+        x = {"labels": []}
+        nm, nf, ne, nc, msgs = 0, 0, 0, 0, []  # number missing, found, empty, corrupt, messages
+        desc = f"{self.prefix}Scanning {path.parent / path.stem}..."
+        total = len(self.im_files)
+        nkpt, ndim = self.data.get("kpt_shape", (0, 0))
+        if self.use_keypoints and (nkpt <= 0 or ndim not in {2, 3}):
+            raise ValueError(
+                "'kpt_shape' in data.yaml missing or incorrect. Should be a list with [number of "
+                "keypoints, number of dims (2 for x,y or 3 for x,y,visible)], i.e. 'kpt_shape: [17, 3]'"
+            )
+        
+        # 自定义验证逻辑：检查RGB/IR/标注文件完整性
+        def verify_flame2_sample(im_file):
+            rgb_file = Path(im_file)
+            thermal_file = self.thermal_dir / rgb_file.name
+            label_file = self.label_dir / rgb_file.with_suffix(".txt").name
+            
+            # 验证RGB图像
+            rgb_ok, rgb_shape = verify_image(rgb_file)
+            if not rgb_ok:
+                return None, 1, 0, 0, 0, f"RGB图像损坏: {rgb_file}"
+            
+            # 验证IR图像
+            thermal_ok, thermal_shape = verify_image(thermal_file)
+            if not thermal_ok:
+                return None, 1, 0, 0, 0, f"IR图像损坏: {thermal_file}"
+            
+            # 验证标注
+            if label_file.exists():
+                lb = self.load_label(label_file)
+                ne_f = 1 if len(lb) == 0 else 0
+                nc_f = 0
+            else:
+                lb = np.zeros((0, 5), dtype=np.float32)
+                ne_f = 1
+                nc_f = 0
+            
+            # 验证尺寸一致性
+            if rgb_shape[:2] != thermal_shape[:2]:
+                return None, 0, 1, 0, 1, f"RGB/IR尺寸不匹配: {rgb_file} vs {thermal_file}"
+            
+            return {
+                "im_file": str(rgb_file),
+                "thermal_file": str(thermal_file),
+                "shape": rgb_shape,
+                "cls": lb[:, 0:1],
+                "bboxes": lb[:, 1:],
+                "segments": [],
+                "keypoints": None,
+                "normalized": True,
+                "bbox_format": "xywh",
+            }, 0, 1, ne_f, nc_f, ""
+
+        with ThreadPool(NUM_THREADS) as pool:
+            results = pool.imap(
+                func=verify_flame2_sample,
+                iterable=self.im_files,
+            )
+            pbar = TQDM(results, desc=desc, total=total)
+            for res in pbar:
+                if res is None:
+                    continue
+                label, nm_f, nf_f, ne_f, nc_f, msg = res
+                nm += nm_f
+                nf += nf_f
+                ne += ne_f
+                nc += nc_f
+                if label:
+                    x["labels"].append(label)
+                if msg:
+                    msgs.append(msg)
+                pbar.desc = f"{desc} {nf} images, {nm + ne} backgrounds, {nc} corrupt"
+            pbar.close()
+
+        if msgs:
+            LOGGER.info("\n".join(msgs))
+        if nf == 0:
+            LOGGER.warning(f"{self.prefix}WARNING ⚠️ No labels found in {path}. {HELP_URL}")
+        x["hash"] = get_hash(self.im_files)
+        x["results"] = nf, nm, ne, nc, len(self.im_files)
+        x["msgs"] = msgs  # warnings
+        save_dataset_cache_file(self.prefix, path, x, DATASET_CACHE_VERSION)
+        return x
+
+    def get_labels(self):
+        """重载标签读取逻辑：适配6通道缓存"""
+        cache_path = Path(self.label_dir) / "flame2.cache"
+        try:
+            cache, exists = load_dataset_cache_file(cache_path), True
+            assert cache["version"] == DATASET_CACHE_VERSION
+            assert cache["hash"] == get_hash(self.im_files)
+        except (FileNotFoundError, AssertionError, AttributeError):
+            cache, exists = self.cache_labels(cache_path), False
+
+        # 显示缓存信息
+        nf, nm, ne, nc, n = cache.pop("results")
+        if exists and LOCAL_RANK in {-1, 0}:
+            d = f"Scanning {cache_path}... {nf} images, {nm + ne} backgrounds, {nc} corrupt"
+            TQDM(None, desc=self.prefix + d, total=n, initial=n)
+            if cache["msgs"]:
+                LOGGER.info("\n".join(cache["msgs"]))
+
+        # 读取缓存标签
+        [cache.pop(k) for k in ("hash", "version", "msgs")]
+        labels = cache["labels"]
+        if not labels:
+            LOGGER.warning(f"WARNING ⚠️ No images found in {cache_path}, training may not work correctly. {HELP_URL}")
+        self.im_files = [lb["im_file"] for lb in labels]
+        return labels
+
+    def build_transforms(self, hyp=None):
+        """
+        重载数据增强：适配6通道图像
+        核心修改：确保增强操作兼容6通道（而非默认3通道）
+        """
+        if self.augment:
+            hyp.mosaic = hyp.mosaic if self.augment and not self.rect else 0.0
+            hyp.mixup = hyp.mixup if self.augment and not self.rect else 0.0
+            # 自定义6通道增强逻辑
+            transforms = self._build_6channel_transforms(self, self.imgsz, hyp)
+        else:
+            # 验证阶段仅做尺寸调整
+            transforms = Compose([LetterBox(new_shape=(self.imgsz, self.imgsz), scaleup=False)])
+        
+        # 格式转换：适配6通道输出
+        transforms.append(
+            Format(
+                bbox_format="xywh",
+                normalize=True,
+                return_mask=self.use_segments,
+                return_keypoint=self.use_keypoints,
+                return_obb=self.use_obb,
+                batch_idx=True,
+                mask_ratio=hyp.mask_ratio if hyp else 4,
+                mask_overlap=hyp.overlap_mask if hyp else 0.5,
+                bgr=hyp.bgr if (hyp and self.augment) else 0.0,
+            )
+        )
+        return transforms
+
+    def _build_6channel_transforms(self, dataset, imgsz, hyp):
+        """
+        构建6通道数据增强流水线
+        核心：所有增强操作同时作用于RGB和IR通道（保持模态一致性）
+        """
+        from .augment import (
+            RandomHSV,
+            RandomFlip,
+            RandomPerspective,
+            MixUp,
+            Mosaic,
+        )
+        transforms = Compose([
+            Mosaic(dataset, p=hyp.mosaic, n=4, imgsz=imgsz),
+            RandomHSV(hsv_h=hyp.hsv_h, hsv_s=hyp.hsv_s, hsv_v=hyp.hsv_v),
+            RandomFlip(direction="horizontal", p=hyp.flipud),
+            RandomPerspective(
+                degrees=hyp.degrees,
+                translate=hyp.translate,
+                scale=hyp.scale,
+                shear=hyp.shear,
+                perspective=hyp.perspective,
+                border=(-imgsz // 2, -imgsz // 2),
+            ),
+            MixUp(dataset, p=hyp.mixup),
+        ])
+        return transforms
+
+    def update_labels_info(self, label):
+        """重载标签格式：适配6通道数据"""
+        bboxes = label.pop("bboxes")
+        segments = label.pop("segments", [])
+        keypoints = label.pop("keypoints", None)
+        bbox_format = label.pop("bbox_format")
+        normalized = label.pop("normalized")
+
+        segment_resamples = 100 if self.use_obb else 1000
+        if len(segments) > 0:
+            max_len = max(len(s) for s in segments)
+            segment_resamples = (max_len + 1) if segment_resamples < max_len else segment_resamples
+            segments = np.stack(resample_segments(segments, n=segment_resamples), axis=0)
+        else:
+            segments = np.zeros((0, segment_resamples, 2), dtype=np.float32)
+        
+        label["instances"] = Instances(bboxes, segments, keypoints, bbox_format=bbox_format, normalized=normalized)
+        return label
+
+    @staticmethod
+    def collate_fn(batch):
+        """
+        重载批次拼接：适配6通道图像张量
+        """
+        new_batch = {}
+        keys = batch[0].keys()
+        values = list(zip(*[list(b.values()) for b in batch]))
+        
+        for i, k in enumerate(keys):
+            value = values[i]
+            if k == "img":
+                # 6通道图像拼接为批次 (B, 6, H, W)
+                new_batch[k] = torch.stack([torch.from_numpy(v).permute(2, 0, 1) for v in value])
+            elif k == "instances":
+                # 实例标注拼接
+                new_batch[k] = [v for v in value]
+            else:
+                new_batch[k] = value
+        return new_batch
