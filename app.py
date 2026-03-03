@@ -162,4 +162,4 @@ with gradio_app:
         with gr.Column():
             app()
 if __name__ == '__main__':
-    gradio_app.launch()
+    gradio_app.launch(share=True)
