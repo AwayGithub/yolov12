@@ -2,11 +2,11 @@
 # 适配RGB+IR 6通道输入的FLAME2数据集配置
 
 # 1. 数据集根路径
-path: FLAME2 # E:/Yan-Unifiles/lab/exp/yolov12/FLAME2
+path: E:/Yan-Unifiles/lab/exp/yolov12/FLAME2
 
 # 2. 训练/验证/测试集划分
-train: train.txt
-val: val.txt
+train: FLAME2/train.txt
+val: FLAME2/val.txt
 
 # 3. 类别信息
 nc: 1  # 类别数量

@@ -534,7 +534,7 @@ class FLAME2Dataset(BaseDataset):
         self.use_segments = task == "segment"
         self.use_keypoints = task == "pose"
         self.use_obb = task == "obb"
-        self.data = data
+        self.data = data # 本质是cfg，即yaml文件
         # 6通道配置读取
         self.input_channels = data.get("input_channels", 6)
         self.rgb_dir = Path(data["path"]) / data["rgb_dir"]
@@ -545,26 +545,65 @@ class FLAME2Dataset(BaseDataset):
         assert not (self.use_segments and self.use_keypoints), "Can not use both segments and keypoints."
         assert self.input_channels == 6, "FLAME2数据集仅支持6通道(RGB+IR)输入"
         super().__init__(*args, **kwargs)
+    
+    def get_img_files(self, img_path):
+        """
+        重写父类方法：从train.txt/val.txt中读取数字索引，
+        然后拼接为RGB图像完整路径
+        """
+        # 如果img_path是txt文件，读取其中的数字索引
+        if isinstance(img_path, (str, Path)) and str(img_path).endswith('.txt'):
+            img_path = Path(img_path)
+            if not img_path.exists():
+                raise FileNotFoundError(f"索引文件不存在: {img_path}")
+            
+            # 读取txt文件中的每一行（每行一个数字）
+            with open(img_path, 'r') as f:
+                indices = [line.strip() for line in f.readlines() if line.strip()]
+            
+            # 将数字转换为RGB图像路径
+            rgb_files = []
+            for idx in indices:
+                rgb_path = self.rgb_dir / f"{idx}.jpg"
+                if rgb_path.exists():
+                    rgb_files.append(str(rgb_path))
+                else:
+                    LOGGER.warning(f"RGB图像不存在: {rgb_path}")
+            
+            return rgb_files
+        else:
+            # 如果不是txt文件，调用父类方法处理
+            return super().get_img_files(img_path)
 
     def get_image_and_label(self, index):
-        """重载：获取单样本的6通道图像+标注"""
-        # 1. 读取文件名（从im_files中获取RGB文件名）
+        """重载：获取单样本的6通道图像+标注
+           在父类的__getitem__()方法中调用"""
         rgb_file = Path(self.im_files[index])
-        # 2. 匹配IR图像文件（替换目录+保持文件名一致）
         thermal_file = self.thermal_dir / rgb_file.name
-        # 3. 匹配标注文件（替换后缀为txt）
         label_file = self.label_dir / rgb_file.with_suffix(".txt").name
 
-        # 4. 加载RGB+IR图像（均为3通道）
-        rgb_img = self.load_image(rgb_file)  # (H,W,3)
-        thermal_img = self.load_image(thermal_file)  # (H,W,3)
-        # 5. 拼接为6通道图像 (H,W,6)
+        # 加载图像
+        rgb_img = self.load_image(rgb_file)
+        thermal_img = self.load_image(thermal_file)
         img = np.concatenate([rgb_img, thermal_img], axis=-1)
 
-        # 6. 加载标注
-        label = self.load_label(label_file)
+        # 加载原始标注 (N, 5) -> [cls, x, y, w, h]
+        label_data = self.load_label(label_file)
 
-        return {"img": img, "label": label, "im_file": str(rgb_file), "thermal_file": str(thermal_file)}
+        # 构建标准的 label 字典，必须包含 update_labels_info 期待的键
+        label_dict = {
+            "img": img,
+            "cls": label_data[:, 0:1] if len(label_data) else np.zeros((0, 1), dtype=np.float32),
+            "bboxes": label_data[:, 1:] if len(label_data) else np.zeros((0, 4), dtype=np.float32),
+            "im_file": str(rgb_file),
+            "ori_shape": img.shape[:2],        # LetterBox 依赖此键
+            "resized_shape": img.shape[:2],    # LetterBox 依赖此键
+            "bbox_format": "xywh",             # 告诉 Instances 你的标注格式
+            "normalized": True                 # 标注是否已归一化
+        }
+
+        # 核心：必须调用 update_labels_info，它会将 bboxes 转换成 'instances' 对象
+        return self.update_labels_info(label_dict)
 
     def load_image(self, img_path):
         """加载单模态图像（RGB/IR），返回HWC格式numpy数组"""
@@ -573,16 +612,14 @@ class FLAME2Dataset(BaseDataset):
         img = cv2.imread(str(img_path))
         if img is None:
             raise ValueError(f"无法读取图像: {img_path}")
-        # 转为RGB格式（cv2默认BGR）
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        # 调整尺寸（与配置一致）
         img = cv2.resize(img, (self.img_size[1], self.img_size[0]))
         return img
 
     def load_label(self, label_file):
         """加载YOLO格式标注"""
         if not label_file.exists():
-            return np.zeros((0, 5), dtype=np.float32)  # 无标注返回空
+            return np.zeros((0, 5), dtype=np.float32)
         with open(label_file, "r") as f:
             lines = f.read().splitlines()
         labels = []
@@ -595,7 +632,7 @@ class FLAME2Dataset(BaseDataset):
             cls = int(parts[0])
             bbox = np.array(parts[1:5], dtype=np.float32)
             labels.append([cls, *bbox])
-        return np.array(labels, dtype=np.float32)
+        return np.array(labels, dtype=np.float32).reshape(-1, 5)
 
     def cache_labels(self, path=Path("./labels.cache")):
         """
@@ -619,13 +656,13 @@ class FLAME2Dataset(BaseDataset):
             label_file = self.label_dir / rgb_file.with_suffix(".txt").name
             
             # 验证RGB图像
-            rgb_ok, rgb_shape = verify_image(rgb_file)
-            if not rgb_ok:
+            (path, cls), nf, nc, msg = verify_image(((rgb_file, None), "rgb"))
+            if not nf:
                 return None, 1, 0, 0, 0, f"RGB图像损坏: {rgb_file}"
             
             # 验证IR图像
-            thermal_ok, thermal_shape = verify_image(thermal_file)
-            if not thermal_ok:
+            (path, cls), nf, nc, msg = verify_image(((thermal_file, None), "thermal"))
+            if not nf:
                 return None, 1, 0, 0, 0, f"IR图像损坏: {thermal_file}"
             
             # 验证标注
@@ -638,21 +675,16 @@ class FLAME2Dataset(BaseDataset):
                 ne_f = 1
                 nc_f = 0
             
-            # 验证尺寸一致性
-            if rgb_shape[:2] != thermal_shape[:2]:
-                return None, 0, 1, 0, 1, f"RGB/IR尺寸不匹配: {rgb_file} vs {thermal_file}"
-            
             return {
                 "im_file": str(rgb_file),
                 "thermal_file": str(thermal_file),
-                "shape": rgb_shape,
                 "cls": lb[:, 0:1],
                 "bboxes": lb[:, 1:],
                 "segments": [],
                 "keypoints": None,
                 "normalized": True,
                 "bbox_format": "xywh",
-            }, 0, 1, ne_f, nc_f, ""
+            }, 0, 1, ne_f, nc_f, "" # missing, found, empty, corrupt
 
         with ThreadPool(NUM_THREADS) as pool:
             results = pool.imap(
@@ -687,7 +719,10 @@ class FLAME2Dataset(BaseDataset):
 
     def get_labels(self):
         """重载标签读取逻辑：适配6通道缓存"""
-        cache_path = Path(self.label_dir) / "flame2.cache"
+        # 确保缓存目录存在
+        cache_dir = Path(self.label_dir)
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        cache_path = cache_dir / "flame2.cache"
         try:
             cache, exists = load_dataset_cache_file(cache_path), True
             assert cache["version"] == DATASET_CACHE_VERSION
