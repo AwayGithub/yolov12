@@ -53,7 +53,7 @@ class SegmentationTrainer(yolo.detect.DetectionTrainer):
             batch["bboxes"],
             masks=batch["masks"],
             paths=batch["im_file"],
-            fname=self.save_dir / f"train_batch{ni}.jpg",
+            fname=self.save_dir / f"train_epoch{self.epoch}_batch{ni}.jpg",
             on_plot=self.on_plot,
         )
 

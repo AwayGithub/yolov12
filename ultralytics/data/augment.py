@@ -1586,9 +1586,16 @@ class LetterBox:
             img = cv2.resize(img, new_unpad, interpolation=cv2.INTER_LINEAR)
         top, bottom = int(round(dh - 0.1)) if self.center else 0, int(round(dh + 0.1))
         left, right = int(round(dw - 0.1)) if self.center else 0, int(round(dw + 0.1))
-        img = cv2.copyMakeBorder(
-            img, top, bottom, left, right, cv2.BORDER_CONSTANT, value=(114, 114, 114)
-        )  # add border
+        if img.ndim == 3 and img.shape[2] == 6:
+            h, w = img.shape[:2]
+            new_img = np.zeros((h + top + bottom, w + left + right, 6), dtype=img.dtype)
+            new_img[..., :3] = 114
+            new_img[top : top + h, left : left + w] = img
+            img = new_img
+        else:
+            img = cv2.copyMakeBorder(
+                img, top, bottom, left, right, cv2.BORDER_CONSTANT, value=(114, 114, 114)
+            )  # add border
         if labels.get("ratio_pad"):
             labels["ratio_pad"] = (labels["ratio_pad"], (left, top))  # for evaluation
 

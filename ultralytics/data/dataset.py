@@ -1,6 +1,8 @@
 # Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
 
 import json
+import os
+from copy import deepcopy
 from collections import defaultdict
 from itertools import repeat
 from multiprocessing.pool import ThreadPool
@@ -520,6 +522,29 @@ class ClassificationDataset:
             save_dataset_cache_file(self.prefix, path, x, DATASET_CACHE_VERSION)
             return samples
 
+class RandomHSV6Channel:
+    """
+    适配6通道图像的RandomHSV：仅对前3个通道（RGB）进行HSV增强
+    """
+    def __init__(self, hgain=0.5, sgain=0.5, vgain=0.5):
+        from .augment import RandomHSV
+        self.aug = RandomHSV(hgain=hgain, sgain=sgain, vgain=vgain)
+        
+    def __call__(self, labels):
+        img = labels["img"]
+        if img.shape[2] == 6:
+            # 分离RGB和IR
+            rgb = np.ascontiguousarray(img[:, :, :3])
+            ir = img[:, :, 3:]
+            # 仅增强RGB
+            labels["img"] = rgb
+            labels = self.aug(labels)
+            # 合并回6通道
+            labels["img"] = np.concatenate([labels["img"], ir], axis=-1)
+        else:
+            labels = self.aug(labels)
+        return labels
+
 class FLAME2Dataset(BaseDataset):
     """
     适配FLAME2数据集的6通道（RGB+IR）数据加载器
@@ -578,7 +603,21 @@ class FLAME2Dataset(BaseDataset):
     def get_image_and_label(self, index):
         """重载：获取单样本的6通道图像+标注
            在父类的__getitem__()方法中调用"""
-        rgb_file = Path(self.im_files[index])
+        
+        # 核心修复：在 MixUp/Mosaic 过程中，index 可能是 label 字典而不是整数
+        if isinstance(index, dict):
+            # 必须深拷贝，否则 Mosaic 增强会修改 buffer 中的原始数据（如 pop('resized_shape')），导致后续 KeyError
+            label = deepcopy(index)
+        else:
+            # 正常索引读取
+            label = deepcopy(self.labels[index])
+        
+        # 如果 label 字典中已经有了加载好的 img，说明是增强过程中的二次调用，直接返回
+        if "img" in label and label["img"] is not None:
+            return label
+
+        # 否则，按照常规流程加载图像
+        rgb_file = Path(label["im_file"])
         thermal_file = self.thermal_dir / rgb_file.name
         label_file = self.label_dir / rgb_file.with_suffix(".txt").name
 
@@ -587,23 +626,27 @@ class FLAME2Dataset(BaseDataset):
         thermal_img = self.load_image(thermal_file)
         img = np.concatenate([rgb_img, thermal_img], axis=-1)
 
-        # 加载原始标注 (N, 5) -> [cls, x, y, w, h]
-        label_data = self.load_label(label_file)
-
-        # 构建标准的 label 字典，必须包含 update_labels_info 期待的键
-        label_dict = {
+        # 构建标准的 label 字典
+        label.update({
             "img": img,
-            "cls": label_data[:, 0:1] if len(label_data) else np.zeros((0, 1), dtype=np.float32),
-            "bboxes": label_data[:, 1:] if len(label_data) else np.zeros((0, 4), dtype=np.float32),
-            "im_file": str(rgb_file),
-            "ori_shape": img.shape[:2],        # LetterBox 依赖此键
-            "resized_shape": img.shape[:2],    # LetterBox 依赖此键
-            "bbox_format": "xywh",             # 告诉 Instances 你的标注格式
-            "normalized": True                 # 标注是否已归一化
-        }
+            "ori_shape": img.shape[:2],
+            "resized_shape": img.shape[:2],
+        })
+        label["ratio_pad"] = (
+            label["resized_shape"][0] / label["ori_shape"][0],
+            label["resized_shape"][1] / label["ori_shape"][1],
+        )
 
         # 核心：必须调用 update_labels_info，它会将 bboxes 转换成 'instances' 对象
-        return self.update_labels_info(label_dict)
+        label = self.update_labels_info(label)
+
+        # 为 Mosaic 数据增强维护缓存 (buffer)
+        if self.max_buffer_length:
+            if len(self.buffer) >= self.max_buffer_length:
+                self.buffer.pop(0)
+            self.buffer.append(deepcopy(label))
+
+        return label
 
     def load_image(self, img_path):
         """加载单模态图像（RGB/IR），返回HWC格式numpy数组"""
@@ -675,6 +718,11 @@ class FLAME2Dataset(BaseDataset):
                 ne_f = 1
                 nc_f = 0
             
+            # 获取图像尺寸 (H, W)
+            # 注意：由于 FLAME2Dataset.load_image 会 resize 图像到 self.img_size
+            # 所以这里的 shape 应该是 self.img_size
+            img_shape = (self.img_size[0], self.img_size[1])
+
             return {
                 "im_file": str(rgb_file),
                 "thermal_file": str(thermal_file),
@@ -684,6 +732,7 @@ class FLAME2Dataset(BaseDataset):
                 "keypoints": None,
                 "normalized": True,
                 "bbox_format": "xywh",
+                "shape": img_shape, # 必须包含此键，否则 rect=True 时会报 KeyError: 'shape'
             }, 0, 1, ne_f, nc_f, "" # missing, found, empty, corrupt
 
         with ThreadPool(NUM_THREADS) as pool:
@@ -722,7 +771,11 @@ class FLAME2Dataset(BaseDataset):
         # 确保缓存目录存在
         cache_dir = Path(self.label_dir)
         cache_dir.mkdir(parents=True, exist_ok=True)
-        cache_path = cache_dir / "flame2.cache"
+        
+        # 使用输入路径的 stem (如 train 或 val) 作为缓存文件名，避免冲突
+        prefix = Path(self.img_path).stem if self.img_path else "flame2"
+        cache_path = cache_dir / f"{prefix}.cache"
+        
         try:
             cache, exists = load_dataset_cache_file(cache_path), True
             assert cache["version"] == DATASET_CACHE_VERSION
@@ -743,7 +796,9 @@ class FLAME2Dataset(BaseDataset):
         labels = cache["labels"]
         if not labels:
             LOGGER.warning(f"WARNING ⚠️ No images found in {cache_path}, training may not work correctly. {HELP_URL}")
-        self.im_files = [lb["im_file"] for lb in labels]
+        
+        # 核心修复：BaseDataset 期望 self.labels 是一个包含 label 字典的列表
+        # 如果缓存中直接存了 label 字典，这里直接返回即可
         return labels
 
     def build_transforms(self, hyp=None):
@@ -782,7 +837,6 @@ class FLAME2Dataset(BaseDataset):
         核心：所有增强操作同时作用于RGB和IR通道（保持模态一致性）
         """
         from .augment import (
-            RandomHSV,
             RandomFlip,
             RandomPerspective,
             MixUp,
@@ -790,7 +844,7 @@ class FLAME2Dataset(BaseDataset):
         )
         transforms = Compose([
             Mosaic(dataset, p=hyp.mosaic, n=4, imgsz=imgsz),
-            RandomHSV(hsv_h=hyp.hsv_h, hsv_s=hyp.hsv_s, hsv_v=hyp.hsv_v),
+            RandomHSV6Channel(hgain=hyp.hsv_h, sgain=hyp.hsv_s, vgain=hyp.hsv_v),
             RandomFlip(direction="horizontal", p=hyp.flipud),
             RandomPerspective(
                 degrees=hyp.degrees,
@@ -806,6 +860,13 @@ class FLAME2Dataset(BaseDataset):
 
     def update_labels_info(self, label):
         """重载标签格式：适配6通道数据"""
+        # 备份这些键，防止 pop 之后在 Mosaic 增强中找不到
+        label["bboxes"] = label.get("bboxes", np.zeros((0, 4), dtype=np.float32))
+        label["segments"] = label.get("segments", [])
+        label["keypoints"] = label.get("keypoints", None)
+        label["bbox_format"] = label.get("bbox_format", "xywh")
+        label["normalized"] = label.get("normalized", True)
+
         bboxes = label.pop("bboxes")
         segments = label.pop("segments", [])
         keypoints = label.pop("keypoints", None)
@@ -821,6 +882,14 @@ class FLAME2Dataset(BaseDataset):
             segments = np.zeros((0, segment_resamples, 2), dtype=np.float32)
         
         label["instances"] = Instances(bboxes, segments, keypoints, bbox_format=bbox_format, normalized=normalized)
+        
+        # 恢复这些键，以便 Mosaic 增强后续步骤（如 _mosaic4）使用
+        label["bboxes"] = bboxes
+        label["segments"] = segments
+        label["keypoints"] = keypoints
+        label["bbox_format"] = bbox_format
+        label["normalized"] = normalized
+        
         return label
 
     @staticmethod
@@ -835,11 +904,26 @@ class FLAME2Dataset(BaseDataset):
         for i, k in enumerate(keys):
             value = values[i]
             if k == "img":
-                # 6通道图像拼接为批次 (B, 6, H, W)
-                new_batch[k] = torch.stack([torch.from_numpy(v).permute(2, 0, 1) for v in value])
+                new_batch[k] = torch.stack(
+                    [torch.from_numpy(v).permute(2, 0, 1) if isinstance(v, np.ndarray) else v for v in value]
+                )
             elif k == "instances":
-                # 实例标注拼接
                 new_batch[k] = [v for v in value]
+            elif k in {"masks", "keypoints", "bboxes", "cls", "segments", "obb"}:
+                if all(v is None for v in value):
+                    new_batch[k] = None
+                else:
+                    tensors = [
+                        torch.from_numpy(v) if isinstance(v, np.ndarray) else v for v in value if v is not None
+                    ]
+                    new_batch[k] = torch.cat(tensors, 0)
             else:
                 new_batch[k] = value
+        
+        if "batch_idx" in new_batch:
+            new_batch["batch_idx"] = list(new_batch["batch_idx"])
+            for i in range(len(new_batch["batch_idx"])):
+                new_batch["batch_idx"][i] += i  # add target image index for build_targets()
+            new_batch["batch_idx"] = torch.cat(new_batch["batch_idx"], 0)
+            
         return new_batch

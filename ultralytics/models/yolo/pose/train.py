@@ -70,7 +70,7 @@ class PoseTrainer(yolo.detect.DetectionTrainer):
             bboxes,
             kpts=kpts,
             paths=paths,
-            fname=self.save_dir / f"train_batch{ni}.jpg",
+            fname=self.save_dir / f"train_epoch{self.epoch}_batch{ni}.jpg",
             on_plot=self.on_plot,
         )
 

@@ -251,7 +251,7 @@ class DetectionValidator(BaseValidator):
             batch["cls"].squeeze(-1),
             batch["bboxes"],
             paths=batch["im_file"],
-            fname=self.save_dir / f"val_batch{ni}_labels.jpg",
+            fname=self.save_dir / f"val_epoch{self.epoch}_batch{ni}_labels.jpg",
             names=self.names,
             on_plot=self.on_plot,
         )
@@ -262,7 +262,7 @@ class DetectionValidator(BaseValidator):
             batch["img"],
             *output_to_target(preds, max_det=self.args.max_det),
             paths=batch["im_file"],
-            fname=self.save_dir / f"val_batch{ni}_pred.jpg",
+            fname=self.save_dir / f"val_epoch{self.epoch}_batch{ni}_pred.jpg",
             names=self.names,
             on_plot=self.on_plot,
         )  # pred

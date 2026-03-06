@@ -403,7 +403,6 @@ class BaseTrainer:
                         if self.stop:  # training time exceeded
                             break
 
-                # Log
                 if RANK in {-1, 0}:
                     loss_length = self.tloss.shape[0] if len(self.tloss.shape) else 1
                     pbar.set_description(
@@ -417,8 +416,8 @@ class BaseTrainer:
                         )
                     )
                     self.run_callbacks("on_batch_end")
-                    if self.args.plots and ni in self.plot_idx:
-                        self.plot_training_samples(batch, ni)
+                    if self.args.plots and i < 3:
+                        self.plot_training_samples(batch, i)
 
                 self.run_callbacks("on_train_batch_end")
 
