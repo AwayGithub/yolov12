@@ -24,6 +24,7 @@ Usage - formats:
 import json
 import time
 from pathlib import Path
+import random
 
 import numpy as np
 import torch
@@ -94,6 +95,7 @@ class BaseValidator:
         self.jdict = None
         self.speed = {"preprocess": 0.0, "inference": 0.0, "loss": 0.0, "postprocess": 0.0}
         self.epoch = 0
+        self.plot_batches = []
 
         self.save_dir = save_dir or get_save_dir(self.args)
         (self.save_dir / "labels" if self.args.save_txt else self.save_dir).mkdir(parents=True, exist_ok=True)
@@ -170,6 +172,13 @@ class BaseValidator:
             model.warmup(imgsz=(1 if pt else self.args.batch, channels, imgsz, imgsz))  # warmup
 
         self.run_callbacks("on_val_start")
+        if self.args.plots:
+            n_batches = len(self.dataloader)
+            k = min(3, n_batches) if n_batches > 0 else 0
+            self.plot_batches = sorted(random.sample(range(n_batches), k)) if k > 0 else []
+        else:
+            self.plot_batches = []
+
         dt = (
             Profile(device=self.device),
             Profile(device=self.device),
@@ -200,7 +209,7 @@ class BaseValidator:
                 preds = self.postprocess(preds)
 
             self.update_metrics(preds, batch)
-            if self.args.plots and batch_i < 3:
+            if self.args.plots and batch_i in self.plot_batches:
                 self.plot_val_samples(batch, batch_i)
                 self.plot_predictions(batch, preds, batch_i)
 

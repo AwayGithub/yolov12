@@ -7,7 +7,7 @@ if __name__ == '__main__':
     # 开始训练
     results = model.train(
     data="ultralytics/cfg/datasets/FLAME2.yaml",
-    epochs=3,
+    epochs=500,
     imgsz=254,
     batch=64,
     workers=0,
