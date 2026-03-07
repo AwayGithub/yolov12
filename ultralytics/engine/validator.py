@@ -93,6 +93,7 @@ class BaseValidator:
         self.iouv = None
         self.jdict = None
         self.speed = {"preprocess": 0.0, "inference": 0.0, "loss": 0.0, "postprocess": 0.0}
+        self.epoch = 0
 
         self.save_dir = save_dir or get_save_dir(self.args)
         (self.save_dir / "labels" if self.args.save_txt else self.save_dir).mkdir(parents=True, exist_ok=True)
@@ -109,6 +110,7 @@ class BaseValidator:
         self.training = trainer is not None
         augment = self.args.augment and (not self.training)
         if self.training:
+            self.epoch = trainer.epoch
             self.device = trainer.device
             self.data = trainer.data
             # force FP16 val during training
@@ -135,11 +137,20 @@ class BaseValidator:
             self.args.half = model.fp16  # update half
             stride, pt, jit, engine = model.stride, model.pt, model.jit, model.engine
             imgsz = check_imgsz(self.args.imgsz, stride=stride)
+            channels = 3
+            if hasattr(model, "model") and hasattr(model.model, "model"):
+                m0 = model.model.model[0]
+                if hasattr(m0, "conv"):
+                    channels = m0.conv.in_channels
+                elif hasattr(m0, "in_channels"):
+                    channels = m0.in_channels
             if engine:
                 self.args.batch = model.batch_size
             elif not pt and not jit:
                 self.args.batch = model.metadata.get("batch", 1)  # export.py models default to batch-size 1
-                LOGGER.info(f"Setting batch={self.args.batch} input of shape ({self.args.batch}, 3, {imgsz}, {imgsz})")
+                LOGGER.info(
+                    f"Setting batch={self.args.batch} input of shape ({self.args.batch}, {channels}, {imgsz}, {imgsz})"
+                )
 
             if str(self.args.data).split(".")[-1] in {"yaml", "yml"}:
                 self.data = check_det_dataset(self.args.data)
@@ -156,7 +167,7 @@ class BaseValidator:
             self.dataloader = self.dataloader or self.get_dataloader(self.data.get(self.args.split), self.args.batch)
 
             model.eval()
-            model.warmup(imgsz=(1 if pt else self.args.batch, 3, imgsz, imgsz))  # warmup
+            model.warmup(imgsz=(1 if pt else self.args.batch, channels, imgsz, imgsz))  # warmup
 
         self.run_callbacks("on_val_start")
         dt = (
