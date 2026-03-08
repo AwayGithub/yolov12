@@ -15,6 +15,7 @@ names:
 
 # 4. 6通道输入配置（供数据加载器读取）
 input_channels: 6                 # 标记输入为RGB(3)+IR(3)共6通道
+input_mode: dual_input
 rgb_dir: 254p RGB Images          # RGB图像，jpg格式
 thermal_dir: 254p Thermal Images  # IR热成像图像，jpg格式
 label_dir: yolo_labels            # YOLO格式标注文件，txt格式

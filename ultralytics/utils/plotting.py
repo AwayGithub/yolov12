@@ -1021,6 +1021,7 @@ def plot_images(
     max_subplots: int = 16,
     save: bool = True,
     conf_thres: float = 0.25,
+    input_mode: str = "dual_input",
 ) -> Optional[np.ndarray]:
     """
     Plot image grid with labels, bounding boxes, masks, and keypoints.
@@ -1073,7 +1074,10 @@ def plot_images(
         x, y = int(w * (i // ns)), int(h * (i % ns))
         img_i = images[i].transpose(1, 2, 0)
         if img_i.shape[2] == 6:
-            img_i = img_i[:, :, 0:3][:, :, ::-1]
+            if input_mode == "rgb_input":
+                img_i = img_i[:, :, 3:6][:, :, ::-1]
+            else:
+                img_i = img_i[:, :, 0:3][:, :, ::-1]
         elif img_i.shape[2] > 3:
             img_i = img_i[:, :, :3]
         mosaic[y : y + h, x : x + w, :] = img_i

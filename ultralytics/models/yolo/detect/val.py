@@ -254,6 +254,7 @@ class DetectionValidator(BaseValidator):
             fname=self.save_dir / f"val_epoch{self.epoch}_batch{ni}_labels.jpg",
             names=self.names,
             on_plot=self.on_plot,
+            input_mode=self.data.get("input_mode", "dual_input"),
         )
 
     def plot_predictions(self, batch, preds, ni):
@@ -265,6 +266,7 @@ class DetectionValidator(BaseValidator):
             fname=self.save_dir / f"val_epoch{self.epoch}_batch{ni}_pred.jpg",
             names=self.names,
             on_plot=self.on_plot,
+            input_mode=self.data.get("input_mode", "dual_input"),
         )  # pred
 
     def save_one_txt(self, predn, save_conf, shape, file):

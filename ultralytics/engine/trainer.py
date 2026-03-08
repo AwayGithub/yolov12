@@ -551,7 +551,9 @@ class BaseTrainer:
         Returns None if data format is not recognized.
         """
         try:
-            if self.args.task == "classify":
+            if isinstance(self.args.data, dict):
+                data = self.args.data
+            elif self.args.task == "classify":
                 data = check_cls_dataset(self.args.data)
             elif self.args.data.split(".")[-1] in {"yaml", "yml"} or self.args.task in {
                 "detect",

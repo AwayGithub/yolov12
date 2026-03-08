@@ -94,6 +94,8 @@ def build_yolo_dataset(cfg, img_path, batch, data, mode="train", rect=False, str
     if data.get("input_channels") == 6:
         from .dataset import FLAME2Dataset
         dataset = FLAME2Dataset
+        if hasattr(cfg, "input_mode"):
+            data["input_mode"] = cfg.input_mode
     else:
         dataset = YOLOMultiModalDataset if multi_modal else YOLODataset
     return dataset(

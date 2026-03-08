@@ -130,6 +130,7 @@ class DetectionTrainer(BaseTrainer):
             paths=batch["im_file"],
             fname=self.save_dir / f"train_epoch{self.epoch}_batch{ni}.jpg",
             on_plot=self.on_plot,
+            input_mode=self.data.get("input_mode", "dual_input"),
         )
 
     def plot_metrics(self):

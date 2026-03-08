@@ -559,9 +559,11 @@ class FLAME2Dataset(BaseDataset):
         self.use_segments = task == "segment"
         self.use_keypoints = task == "pose"
         self.use_obb = task == "obb"
-        self.data = data # 本质是cfg，即yaml文件
-        # 6通道配置读取
+        self.data = data
         self.input_channels = data.get("input_channels", 6)
+        self.input_mode = data.get("input_mode", "dual_input")
+        if self.input_mode not in {"dual_input", "rgb_input", "ir_input"}:
+            self.input_mode = "dual_input"
         self.rgb_dir = Path(data["path"]) / data["rgb_dir"]
         self.thermal_dir = Path(data["path"]) / data["thermal_dir"]
         self.label_dir = Path(data["path"]) / data["label_dir"]
@@ -579,6 +581,8 @@ class FLAME2Dataset(BaseDataset):
         # 如果img_path是txt文件，读取其中的数字索引
         if isinstance(img_path, (str, Path)) and str(img_path).endswith('.txt'):
             img_path = Path(img_path)
+            if not img_path.is_absolute():
+                img_path = Path(self.data["path"]) / img_path
             if not img_path.exists():
                 raise FileNotFoundError(f"索引文件不存在: {img_path}")
             
@@ -621,10 +625,13 @@ class FLAME2Dataset(BaseDataset):
         thermal_file = self.thermal_dir / rgb_file.name
         label_file = self.label_dir / rgb_file.with_suffix(".txt").name
 
-        # 加载图像
         rgb_img = self.load_image(rgb_file)
         thermal_img = self.load_image(thermal_file)
         img = np.concatenate([rgb_img, thermal_img], axis=-1)
+        if self.input_mode == "rgb_input":
+            img[:, :, 3:] = 0
+        elif self.input_mode == "ir_input":
+            img[:, :, :3] = 0
 
         # 构建标准的 label 字典
         label.update({
