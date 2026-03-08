@@ -1,8 +1,8 @@
 from ultralytics import YOLO
 
 if __name__ == '__main__':
-    # 加载YOLOv12n模型（yaml中已配置ch=6, nc=1）
-    model = YOLO("yolov12n.yaml")
+    # 加载YOLOv12s模型（yaml中已配置ch=6, nc=1）
+    model = YOLO("yolov12s.yaml")
 
     # 开始训练
     results = model.train(
