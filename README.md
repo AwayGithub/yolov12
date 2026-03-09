@@ -147,6 +147,20 @@ results[0].show()
 
 ```
 
+## Resume Training
+```python
+# resume_train.py
+from ultralytics import YOLO
+
+if __name__ == "__main__":
+    model = YOLO("runs/detect/train/weights/last.pt")
+    model.train(resume=True)
+
+```
+```cmd
+python resume_train.py
+```
+
 ## Prediction
 ```python
 from ultralytics import YOLO

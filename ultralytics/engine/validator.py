@@ -154,7 +154,9 @@ class BaseValidator:
                     f"Setting batch={self.args.batch} input of shape ({self.args.batch}, {channels}, {imgsz}, {imgsz})"
                 )
 
-            if str(self.args.data).split(".")[-1] in {"yaml", "yml"}:
+            if isinstance(self.args.data, dict):
+                self.data = self.args.data
+            elif str(self.args.data).split(".")[-1] in {"yaml", "yml"}:
                 self.data = check_det_dataset(self.args.data)
             elif self.args.task == "classify":
                 self.data = check_cls_dataset(self.args.data, split=self.args.split)
@@ -226,7 +228,7 @@ class BaseValidator:
             return {k: round(float(v), 5) for k, v in results.items()}  # return results as 5 decimal place floats
         else:
             LOGGER.info(
-                "Speed: {:.1f}ms preprocess, {:.1f}ms inference, {:.1f}ms loss, {:.1f}ms postprocess per image".format(
+                "Speed: {:.4f}ms preprocess, {:.4f}ms inference, {:.4f}ms loss, {:.4f}ms postprocess per image".format(
                     *tuple(self.speed.values())
                 )
             )

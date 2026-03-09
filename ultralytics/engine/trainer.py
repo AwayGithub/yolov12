@@ -700,7 +700,10 @@ class BaseTrainer:
 
                 # Check that resume data YAML exists, otherwise strip to force re-download of dataset
                 ckpt_args = attempt_load_weights(last).args
-                if not Path(ckpt_args["data"]).exists():
+                if isinstance(ckpt_args["data"], dict):
+                    # If data is a dict (like our FLAME2 config with input_mode), use current args.data
+                    ckpt_args["data"] = self.args.data
+                elif not Path(ckpt_args["data"]).exists():
                     ckpt_args["data"] = self.args.data
 
                 resume = True

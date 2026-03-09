@@ -71,6 +71,12 @@ class DetectionTrainer(BaseTrainer):
                 ]  # new shape (stretched to gs-multiple)
                 imgs = nn.functional.interpolate(imgs, size=ns, mode="bilinear", align_corners=False)
             batch["img"] = imgs
+        
+        # 打印模型输入的形状（每个 epoch 的第一个 batch）
+        if not hasattr(self, "_last_printed_epoch") or self._last_printed_epoch != self.epoch:
+            LOGGER.info(f"\n Epoch {self.epoch} - Model input shape: {batch['img'].shape}")
+            self._last_printed_epoch = self.epoch
+            
         return batch
 
     def set_model_attributes(self):
@@ -85,7 +91,11 @@ class DetectionTrainer(BaseTrainer):
 
     def get_model(self, cfg=None, weights=None, verbose=True):
         """Return a YOLO detection model."""
-        model = DetectionModel(cfg, nc=self.data["nc"], verbose=verbose and RANK == -1)
+        # 根据 input_mode 确定输入通道数
+        input_mode = self.data.get("input_mode", "dual_input")
+        ch = 6 if input_mode == "dual_input" else 3
+        
+        model = DetectionModel(cfg, ch=ch, nc=self.data["nc"], verbose=verbose and RANK == -1)
         if weights:
             model.load(weights)
         return model

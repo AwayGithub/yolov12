@@ -294,7 +294,7 @@ class BasePredictor:
         if self.args.verbose and self.seen:
             t = tuple(x.t / self.seen * 1e3 for x in profilers)  # speeds per image
             LOGGER.info(
-                f"Speed: %.1fms preprocess, %.1fms inference, %.1fms postprocess per image at shape "
+                f"Speed: %.4fms preprocess, %.4fms inference, %.4fms postprocess per image at shape "
                 f"{(min(self.args.batch, self.seen), 3, *im.shape[2:])}" % t
             )
         if self.args.save or self.args.save_txt or self.args.save_crop:
@@ -336,7 +336,7 @@ class BasePredictor:
         string += "{:g}x{:g} ".format(*im.shape[2:])
         result = self.results[i]
         result.save_dir = self.save_dir.__str__()  # used in other locations
-        string += f"{result.verbose()}{result.speed['inference']:.1f}ms"
+        string += f"{result.verbose()}{result.speed['inference']:.4f}ms"
 
         # Add predictions to image
         if self.args.save or self.args.show:

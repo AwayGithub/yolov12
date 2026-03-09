@@ -560,17 +560,23 @@ class FLAME2Dataset(BaseDataset):
         self.use_keypoints = task == "pose"
         self.use_obb = task == "obb"
         self.data = data
-        self.input_channels = data.get("input_channels", 6)
         self.input_mode = data.get("input_mode", "dual_input")
         if self.input_mode not in {"dual_input", "rgb_input", "ir_input"}:
             self.input_mode = "dual_input"
+        
+        # 根据 input_mode 确定 input_channels
+        if self.input_mode == "dual_input":
+            self.input_channels = 6
+        else:
+            self.input_channels = 3
+            
         self.rgb_dir = Path(data["path"]) / data["rgb_dir"]
         self.thermal_dir = Path(data["path"]) / data["thermal_dir"]
         self.label_dir = Path(data["path"]) / data["label_dir"]
         self.img_size = data.get("img_size", [254, 254])
         
         assert not (self.use_segments and self.use_keypoints), "Can not use both segments and keypoints."
-        assert self.input_channels == 6, "FLAME2数据集仅支持6通道(RGB+IR)输入"
+        # assert self.input_channels == 6, "FLAME2数据集仅支持6通道(RGB+IR)输入"
         super().__init__(*args, **kwargs)
     
     def get_img_files(self, img_path):
@@ -627,11 +633,15 @@ class FLAME2Dataset(BaseDataset):
 
         rgb_img = self.load_image(rgb_file)
         thermal_img = self.load_image(thermal_file)
-        img = np.concatenate([rgb_img, thermal_img], axis=-1)
-        if self.input_mode == "rgb_input":
-            img[:, :, 3:] = 0
+        
+        if self.input_mode == "dual_input":
+            img = np.concatenate([rgb_img, thermal_img], axis=-1)
+        elif self.input_mode == "rgb_input":
+            img = rgb_img
         elif self.input_mode == "ir_input":
-            img[:, :, :3] = 0
+            img = thermal_img
+        else:
+            img = np.concatenate([rgb_img, thermal_img], axis=-1)
 
         # 构建标准的 label 字典
         label.update({
@@ -656,13 +666,14 @@ class FLAME2Dataset(BaseDataset):
         return label
 
     def load_image(self, img_path):
-        """加载单模态图像（RGB/IR），返回HWC格式numpy数组"""
+        """加载单模态图像（RGB/IR），返回HWC格式numpy数组 (BGR)"""
         if not img_path.exists():
             raise FileNotFoundError(f"图像文件不存在: {img_path}")
         img = cv2.imread(str(img_path))
         if img is None:
             raise ValueError(f"无法读取图像: {img_path}")
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        # 移除 cvtColor(img, cv2.COLOR_BGR2RGB)，保持 BGR 格式
+        # 因为 RandomHSV 等增强操作期望 BGR，且 plot_images 也期望 BGR
         img = cv2.resize(img, (self.img_size[1], self.img_size[0]))
         return img
 

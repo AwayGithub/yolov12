@@ -22,7 +22,7 @@ if __name__ == "__main__":
     model = YOLO("yolov12n.yaml")
     results = model.train(
         data=data_cfg,
-        epochs=300,
+        epochs=3,
         imgsz=254,
         batch=64,
         workers=0,
