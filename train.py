@@ -19,10 +19,10 @@ if __name__ == "__main__":
     data_cfg = yaml_load("ultralytics/cfg/datasets/RGBT-3M.yaml")
     data_cfg["input_mode"] = args.input_mode
 
-    model = YOLO(r"E:\Yan-Unifiles\lab\exp\yolov12\runs\detect\train\weights\last.pt")
+    model = YOLO("yolov12n.yaml")
     results = model.train(
         data=data_cfg,
-        epochs=1000,
+        epochs=300,
         imgsz=256,  # 输入模型的尺寸，也是验证的尺寸
         batch=64,
         workers=0,

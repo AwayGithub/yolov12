@@ -888,7 +888,7 @@ class FLAME2Dataset(BaseDataset):
             
         transforms = Compose([
             RandomFlip(direction="horizontal", p=hyp.flipud),
-            MixUp(dataset, p=hyp.mixup),
+            # MixUp(dataset, p=hyp.mixup),
             LetterBox(new_shape=(imgsz, imgsz), scaleup=False),
         ])
         return transforms
