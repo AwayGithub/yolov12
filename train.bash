@@ -10,5 +10,6 @@ conda activate yolov12
 # 3. 运行两次训练
 cd "/e/Yan-Unifiles/lab/exp/yolov12"
 
+python train.py --input_mode dual_input
 python train.py --input_mode rgb_input
 python train.py --input_mode ir_input

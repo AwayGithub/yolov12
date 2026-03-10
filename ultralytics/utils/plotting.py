@@ -1074,12 +1074,7 @@ def plot_images(
         x, y = int(w * (i // ns)), int(h * (i % ns))
         img_i = images[i].transpose(1, 2, 0)
         if img_i.shape[2] == 6:
-            if input_mode == "rgb_input":
-                img_i = img_i[:, :, 0:3] # BGR
-            elif input_mode == "ir_input":
-                img_i = img_i[:, :, 3:6] # Thermal BGR
-            else:
-                img_i = img_i[:, :, 0:3] # default BGR
+            img_i = img_i[:, :, 3:6] # 使用 RGB 图像
         elif img_i.shape[2] > 3:
             img_i = img_i[:, :, :3]
         mosaic[y : y + h, x : x + w, :] = img_i

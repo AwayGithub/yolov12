@@ -15,7 +15,7 @@ dataset = FLAME2Dataset(
     augment=False
 )
 
-id = 29378
+id = 789
 sample = dataset[id]
 
 # 1. 将 Tensor 转换为 HWC 格式的 Numpy 数组

@@ -1,0 +1,32 @@
+# Ultralytics YOLO 🚀 RGBT-3M Dataset Configuration
+# 适配 RGB+IR 6通道输入的 RGBT-3M 数据集配置
+
+# 1. 数据集名称 (用于 build_yolo_dataset 识别)
+name: RGBT-3M
+
+# 2. 数据集根路径
+path: e:\Yan-Unifiles\lab\exp\yolov12\RGBT-3M
+
+# 3. 训练/验证集划分 (使用 sample_subset.py 生成的索引文件)
+train: train.txt
+val: val.txt
+
+# 4. 类别信息
+nc: 3  # 类别数量: smoke, fire, person
+names:
+  0: smoke
+  1: fire
+  2: person
+
+# 5. 6通道输入配置 (供 RGBT3MDataset 数据加载器读取)
+input_channels: 6                 # 标记输入为 RGB(3)+IR(3) 共 6 通道
+input_mode: dual_input
+rgb_dir: RGB                      # RGB 图像目录
+thermal_dir: IR                   # IR 图像目录
+label_dir: labels                 # YOLO 格式标注目录
+
+# 6. 图像尺寸 (H, W)
+img_size: [480, 640]
+
+# 7. 标注格式
+format: yolo  # YOLO 格式 (class_id x_center y_center width height)

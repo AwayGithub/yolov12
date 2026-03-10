@@ -16,14 +16,14 @@ def parse_args():
 
 if __name__ == "__main__":
     args = parse_args()
-    data_cfg = yaml_load("ultralytics/cfg/datasets/FLAME2.yaml")
+    data_cfg = yaml_load("ultralytics/cfg/datasets/RGBT-3M.yaml")
     data_cfg["input_mode"] = args.input_mode
 
     model = YOLO("yolov12n.yaml")
     results = model.train(
         data=data_cfg,
-        epochs=3,
-        imgsz=254,
+        epochs=250,
+        imgsz=256,
         batch=64,
         workers=0,
         device=0,

@@ -524,26 +524,56 @@ class ClassificationDataset:
 
 class RandomHSV6Channel:
     """
-    适配6通道图像的RandomHSV：仅对前3个通道（RGB）进行HSV增强
+    适配6通道图像的RandomHSV：仅对前3个通道（RGB）进行HSV与对比度增强
     """
-    def __init__(self, hgain=0.5, sgain=0.5, vgain=0.5):
+    def __init__(self, hgain=0.5, sgain=0.5, vgain=0.5, cgain=0.0, input_mode="dual_input"):
         from .augment import RandomHSV
         self.aug = RandomHSV(hgain=hgain, sgain=sgain, vgain=vgain)
+        self.cgain = cgain
+        self.input_mode = input_mode
         
     def __call__(self, labels):
+        """Applies HSV and Contrast augmentation to the RGB modality only."""
         img = labels["img"]
+        
+        # 处理6通道输入 (FLAME2Dataset 始终返回6通道)
         if img.shape[2] == 6:
-            # 分离RGB和IR
+            # 始终保护 IR 通道 (3-5)
             rgb = np.ascontiguousarray(img[:, :, :3])
             ir = img[:, :, 3:]
-            # 仅增强RGB
-            labels["img"] = rgb
-            labels = self.aug(labels)
-            # 合并回6通道
-            labels["img"] = np.concatenate([labels["img"], ir], axis=-1)
-        else:
-            labels = self.aug(labels)
+            
+            # 根据 input_mode 决定是否增强 RGB 通道 (0-2)
+            if self.input_mode != "ir_input":
+                labels["img"] = rgb
+                labels = self.aug(labels)
+                if self.cgain > 0:
+                    labels["img"] = self.apply_contrast(labels["img"], self.cgain)
+                rgb = labels["img"]
+            
+            # 合并回6通道，保持 IR 通道绝对不变
+            labels["img"] = np.ascontiguousarray(np.concatenate([rgb, ir], axis=-1))
+            
+        # 处理3通道输入 (RGBT3MDataset 在单模态模式下可能返回3通道)
+        elif img.shape[2] == 3:
+            if self.input_mode == "ir_input":
+                # IR 模态：严格禁止 HSV 和 对比度增强
+                pass
+            else:
+                # RGB 模态或默认情况：允许增强
+                labels = self.aug(labels)
+                if self.cgain > 0:
+                    labels["img"] = self.apply_contrast(labels["img"], self.cgain)
+                    
         return labels
+
+    def apply_contrast(self, img, gain):
+        """应用随机对比度增强"""
+        if gain <= 0:
+            return img
+        factor = np.random.uniform(1 - gain, 1 + gain)
+        # 均值化对比度增强：img = (img - mean) * factor + mean
+        mean = img.mean()
+        return np.clip((img.astype(np.float32) - mean) * factor + mean, 0, 255).astype(np.uint8)
 
 class FLAME2Dataset(BaseDataset):
     """
@@ -564,11 +594,9 @@ class FLAME2Dataset(BaseDataset):
         if self.input_mode not in {"dual_input", "rgb_input", "ir_input"}:
             self.input_mode = "dual_input"
         
-        # 根据 input_mode 确定 input_channels
-        if self.input_mode == "dual_input":
-            self.input_channels = 6
-        else:
-            self.input_channels = 3
+        # 始终为 FLAME2Dataset 保持 6 通道输入 (RGB+IR)
+        # 即使是 ir_input 模式，也加载 RGB 图像用于后续可视化
+        self.input_channels = 6
             
         self.rgb_dir = Path(data["path"]) / data["rgb_dir"]
         self.thermal_dir = Path(data["path"]) / data["thermal_dir"]
@@ -576,7 +604,6 @@ class FLAME2Dataset(BaseDataset):
         self.img_size = data.get("img_size", [254, 254])
         
         assert not (self.use_segments and self.use_keypoints), "Can not use both segments and keypoints."
-        # assert self.input_channels == 6, "FLAME2数据集仅支持6通道(RGB+IR)输入"
         super().__init__(*args, **kwargs)
     
     def get_img_files(self, img_path):
@@ -634,14 +661,9 @@ class FLAME2Dataset(BaseDataset):
         rgb_img = self.load_image(rgb_file)
         thermal_img = self.load_image(thermal_file)
         
-        if self.input_mode == "dual_input":
-            img = np.concatenate([rgb_img, thermal_img], axis=-1)
-        elif self.input_mode == "rgb_input":
-            img = rgb_img
-        elif self.input_mode == "ir_input":
-            img = thermal_img
-        else:
-            img = np.concatenate([rgb_img, thermal_img], axis=-1)
+        # 始终返回 6 通道图像 (RGB + IR)
+        # 即使在单模态模式下，也保留双模态图像用于可视化
+        img = np.concatenate([rgb_img, thermal_img], axis=-1)
 
         # 构建标准的 label 字典
         label.update({
@@ -860,9 +882,13 @@ class FLAME2Dataset(BaseDataset):
             MixUp,
             Mosaic,
         )
+        
+        # 核心修复：Mosaic/RandomPerspective 期望 imgsz 为整数
+        # 如果传入的是列表 [H, W]，取其最大值作为增强基准尺寸
+        if isinstance(imgsz, (list, tuple)):
+            imgsz = max(imgsz)
+            
         transforms = Compose([
-            Mosaic(dataset, p=hyp.mosaic, n=4, imgsz=imgsz),
-            RandomHSV6Channel(hgain=hyp.hsv_h, sgain=hyp.hsv_s, vgain=hyp.hsv_v),
             RandomFlip(direction="horizontal", p=hyp.flipud),
             RandomPerspective(
                 degrees=hyp.degrees,
@@ -945,3 +971,156 @@ class FLAME2Dataset(BaseDataset):
             new_batch["batch_idx"] = torch.cat(new_batch["batch_idx"], 0)
             
         return new_batch
+
+class RGBT3MDataset(FLAME2Dataset):
+    """
+    RGBT-3M 数据集加载器
+    - 图像大小: 640x480
+    - IR模态: 3通道（三通道数值相等）
+    - 目录结构: RGB/{train,val}, IR/{train,val}, labels/{train,val}
+    """
+
+    def __init__(self, *args, data=None, task="detect", **kwargs):
+        """初始化RGBT3M数据集加载器"""
+        super().__init__(*args, data=data, task=task, **kwargs)
+        # RGBT-3M 默认分辨率 640x480 (H=480, W=640)
+        self.img_size = data.get("img_size", [480, 640])
+
+    def get_img_files(self, img_path):
+        """
+        根据 train.txt / val.txt 中的文件名，结合 RGBT-3M 的目录结构查找图像路径
+        """
+        if isinstance(img_path, (str, Path)) and str(img_path).endswith('.txt'):
+            img_path = Path(img_path)
+            if not img_path.is_absolute():
+                img_path = Path(self.data["path"]) / img_path
+            
+            with open(img_path, 'r') as f:
+                indices = [line.strip() for line in f.readlines() if line.strip()]
+            
+            # 根据索引文件名判断子目录 (train 或 val)
+            subset = "train" if "train" in img_path.name else "val"
+            
+            rgb_files = []
+            for idx in indices:
+                # 按照 RGBT-3M 结构拼接路径: RGB/train/xxx.jpg 或 RGB/val/xxx.jpg
+                rgb_path = self.rgb_dir / subset / f"{idx}.jpg"
+                if rgb_path.exists():
+                    rgb_files.append(str(rgb_path))
+                else:
+                    LOGGER.warning(f"RGBT-3M RGB图像不存在: {rgb_path}")
+            
+            return rgb_files
+        else:
+            return super().get_img_files(img_path)
+
+    def get_image_and_label(self, index):
+        """获取单样本的 6 通道图像 + 标注"""
+        if isinstance(index, dict):
+            label = deepcopy(index)
+        else:
+            label = deepcopy(self.labels[index])
+        
+        if "img" in label and label["img"] is not None:
+            return label
+
+        rgb_file = Path(label["im_file"])
+        # 根据 RGB 文件的相对路径构造 IR 和 Label 路径
+        # 例如: RGB/train/xxx.jpg -> IR/train/xxx.jpg, labels/train/xxx.txt
+        rel_path = rgb_file.relative_to(self.rgb_dir)
+        thermal_file = self.thermal_dir / rel_path
+        label_file = self.label_dir / rel_path.with_suffix(".txt")
+
+        rgb_img = self.load_image(rgb_file)
+        thermal_img = self.load_image(thermal_file) # IR 已经是 3 通道且数值相等
+        
+        if self.input_mode == "dual_input":
+            img = np.concatenate([rgb_img, thermal_img], axis=-1)
+        elif self.input_mode == "rgb_input":
+            img = rgb_img
+        elif self.input_mode == "ir_input":
+            img = thermal_img
+        else:
+            img = np.concatenate([rgb_img, thermal_img], axis=-1)
+
+        label.update({
+            "img": img,
+            "ori_shape": img.shape[:2],
+            "resized_shape": img.shape[:2],
+        })
+        label["ratio_pad"] = (
+            label["resized_shape"][0] / label["ori_shape"][0],
+            label["resized_shape"][1] / label["ori_shape"][1],
+        )
+
+        label = self.update_labels_info(label)
+
+        # 为 Mosaic 数据增强维护缓存 (buffer)
+        if self.max_buffer_length:
+            if len(self.buffer) >= self.max_buffer_length:
+                self.buffer.pop(0)
+            self.buffer.append(deepcopy(label))
+
+        return label
+
+    def cache_labels(self, path=Path("./labels.cache")):
+        """重载缓存逻辑：适配 RGBT-3M 的双模态验证"""
+        x = {"labels": []}
+        nm, nf, ne, nc, msgs = 0, 0, 0, 0, []
+        desc = f"{self.prefix}Scanning {path.parent / path.stem}..."
+        total = len(self.im_files)
+        
+        def verify_rgbt3m_sample(im_file):
+            rgb_file = Path(im_file)
+            rel_path = rgb_file.relative_to(self.rgb_dir)
+            thermal_file = self.thermal_dir / rel_path
+            label_file = self.label_dir / rel_path.with_suffix(".txt")
+            
+            # 验证 RGB
+            (path, cls), nf, nc, msg = verify_image(((rgb_file, None), "rgb"))
+            if not nf: return None, 1, 0, 0, 0, f"RGB损坏: {rgb_file}"
+            
+            # 验证 IR
+            (path, cls), nf, nc, msg = verify_image(((thermal_file, None), "thermal"))
+            if not nf: return None, 1, 0, 0, 0, f"IR损坏: {thermal_file}"
+            
+            # 验证标注
+            if label_file.exists():
+                lb = self.load_label(label_file)
+                ne_f = 1 if len(lb) == 0 else 0
+                nc_f = 0
+            else:
+                lb = np.zeros((0, 5), dtype=np.float32)
+                ne_f = 1
+                nc_f = 0
+            
+            img_shape = (self.img_size[0], self.img_size[1])
+            return {
+                "im_file": str(rgb_file),
+                "cls": lb[:, 0:1],
+                "bboxes": lb[:, 1:],
+                "segments": [],
+                "keypoints": None,
+                "normalized": True,
+                "bbox_format": "xywh",
+                "shape": img_shape,
+            }, 0, 1, ne_f, nc_f, ""
+
+        with ThreadPool(NUM_THREADS) as pool:
+            results = pool.imap(func=verify_rgbt3m_sample, iterable=self.im_files)
+            pbar = TQDM(results, desc=desc, total=total)
+            for res in pbar:
+                if res is None: continue
+                label, nm_f, nf_f, ne_f, nc_f, msg = res
+                nm += nm_f; nf += nf_f; ne += ne_f; nc += nc_f
+                if label: x["labels"].append(label)
+                if msg: msgs.append(msg)
+                pbar.desc = f"{desc} {nf} images, {nm + ne} backgrounds, {nc} corrupt"
+            pbar.close()
+
+        if msgs: LOGGER.info("\n".join(msgs))
+        x["hash"] = get_hash(self.im_files)
+        x["results"] = nf, nm, ne, nc, len(self.im_files)
+        x["msgs"] = msgs
+        save_dataset_cache_file(self.prefix, path, x, DATASET_CACHE_VERSION)
+        return x

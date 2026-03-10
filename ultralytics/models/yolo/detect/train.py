@@ -72,9 +72,42 @@ class DetectionTrainer(BaseTrainer):
                 imgs = nn.functional.interpolate(imgs, size=ns, mode="bilinear", align_corners=False)
             batch["img"] = imgs
         
-        # 打印模型输入的形状（每个 epoch 的第一个 batch）
-        if not hasattr(self, "_last_printed_epoch") or self._last_printed_epoch != self.epoch:
-            LOGGER.info(f"\n Epoch {self.epoch} - Model input shape: {batch['img'].shape}")
+        # 处理单模态输入 (RGBT-3M/FLAME2 为 6 通道输入)
+        input_mode = self.data.get("input_mode", "dual_input")
+        if batch["img"].shape[1] == 6 and input_mode != "dual_input":
+            # 备份完整的 6 通道数据用于可视化 (0:3 为 RGB, 3:6 为 IR)
+            batch["img_full"] = batch["img"].clone()
+            # 为模型输入进行切片
+            if input_mode == "rgb_input":
+                batch["img"] = batch["img"][:, 0:3, ...] # 仅保留 RGB 通道
+            elif input_mode == "ir_input":
+                batch["img"] = batch["img"][:, 3:6, ...] # 仅保留 IR 通道
+            
+        # 打印模型输入的形状（第一 epoch 的第一个 batch，特别是 RGBT-3M）
+        if self.epoch == self.start_epoch and not hasattr(self, "_rgbt3m_shape_printed"):
+            # 保存模型输入的第一批图片用于验证
+            import cv2
+            import numpy as np
+            from pathlib import Path
+            save_path = Path(self.save_dir) / "input_samples"
+            save_path.mkdir(parents=True, exist_ok=True)
+            
+            for i in range(min(4, batch["img"].shape[0])):
+                img_to_save = (batch["img"][i].detach().cpu().numpy().transpose(1, 2, 0) * 255).astype(np.uint8)
+                if img_to_save.shape[2] == 3:
+                    # 单模态直接存，注意 OpenCV 期望 BGR
+                    cv2.imwrite(str(save_path / f"batch0_img{i}_{input_mode}.jpg"), img_to_save)
+                elif img_to_save.shape[2] == 6:
+                    # 6 通道存为两张，一张 RGB，一张 IR
+                    cv2.imwrite(str(save_path / f"batch0_img{i}_rgb.jpg"), img_to_save[:, :, :3])
+                    cv2.imwrite(str(save_path / f"batch0_img{i}_ir.jpg"), img_to_save[:, :, 3:])
+            LOGGER.info(f"\n[Input Mode: {input_mode}] Saved sample images to {save_path}")
+
+            if self.data.get("name") == "RGBT-3M":
+                LOGGER.info(f"\n[RGBT-3M] Epoch {self.epoch} - Model input shape: {batch['img'].shape}")
+                self._rgbt3m_shape_printed = True
+        elif not hasattr(self, "_last_printed_epoch") or self._last_printed_epoch != self.epoch:
+            LOGGER.info(f"\nEpoch {self.epoch} - Model input shape: {batch['img'].shape}")
             self._last_printed_epoch = self.epoch
             
         return batch
@@ -133,7 +166,7 @@ class DetectionTrainer(BaseTrainer):
     def plot_training_samples(self, batch, ni):
         """Plots training samples with their annotations."""
         plot_images(
-            images=batch["img"],
+            images=batch.get("img_full", batch["img"]),
             batch_idx=batch["batch_idx"],
             cls=batch["cls"].squeeze(-1),
             bboxes=batch["bboxes"],

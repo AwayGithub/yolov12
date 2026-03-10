@@ -54,6 +54,17 @@ class DetectionValidator(BaseValidator):
         for k in ["batch_idx", "cls", "bboxes"]:
             batch[k] = batch[k].to(self.device)
 
+        # 处理单模态输入 (RGBT-3M/FLAME2 为 6 通道输入)
+        input_mode = self.data.get("input_mode", "dual_input")
+        if batch["img"].shape[1] == 6 and input_mode != "dual_input":
+            # 备份完整的 6 通道数据用于可视化 (0:3 为 RGB, 3:6 为 IR)
+            batch["img_full"] = batch["img"].clone()
+            # 为模型输入进行切片
+            if input_mode == "rgb_input":
+                batch["img"] = batch["img"][:, 0:3, ...] # 仅保留 RGB 通道
+            elif input_mode == "ir_input":
+                batch["img"] = batch["img"][:, 3:6, ...] # 仅保留 IR 通道
+
         if self.args.save_hybrid:
             height, width = batch["img"].shape[2:]
             nb = len(batch["img"])
@@ -246,7 +257,7 @@ class DetectionValidator(BaseValidator):
     def plot_val_samples(self, batch, ni):
         """Plot validation image samples."""
         plot_images(
-            batch["img"],
+            batch.get("img_full", batch["img"]),
             batch["batch_idx"],
             batch["cls"].squeeze(-1),
             batch["bboxes"],
@@ -260,7 +271,7 @@ class DetectionValidator(BaseValidator):
     def plot_predictions(self, batch, preds, ni):
         """Plots predicted bounding boxes on input images and saves the result."""
         plot_images(
-            batch["img"],
+            batch.get("img_full", batch["img"]),
             *output_to_target(preds, max_det=self.args.max_det),
             paths=batch["im_file"],
             fname=self.save_dir / f"val_epoch{self.epoch}_batch{ni}_pred.jpg",

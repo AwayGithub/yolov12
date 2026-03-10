@@ -92,8 +92,13 @@ def seed_worker(worker_id):  # noqa
 def build_yolo_dataset(cfg, img_path, batch, data, mode="train", rect=False, stride=32, multi_modal=False):
     """Build YOLO Dataset."""
     if data.get("input_channels") == 6:
-        from .dataset import FLAME2Dataset
-        dataset = FLAME2Dataset
+        if data.get("name") == "RGBT-3M":
+            from .dataset import RGBT3MDataset
+            dataset = RGBT3MDataset
+        else:
+            from .dataset import FLAME2Dataset
+            dataset = FLAME2Dataset
+        
         if hasattr(cfg, "input_mode"):
             data["input_mode"] = cfg.input_mode
     else:
