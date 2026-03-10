@@ -17,12 +17,12 @@ def parse_args():
 if __name__ == "__main__":
     args = parse_args()
     data_cfg = yaml_load("ultralytics/cfg/datasets/RGBT-3M.yaml")
-    data_cfg["input_mode"] = "ir_input"
+    data_cfg["input_mode"] = args.input_mode
 
-    model = YOLO("yolov12n.yaml")
+    model = YOLO(r"E:\Yan-Unifiles\lab\exp\yolov12\runs\detect\train\weights\last.pt")
     results = model.train(
         data=data_cfg,
-        epochs=250,
+        epochs=1000,
         imgsz=256,  # 输入模型的尺寸，也是验证的尺寸
         batch=64,
         workers=0,

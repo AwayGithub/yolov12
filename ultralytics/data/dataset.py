@@ -879,13 +879,7 @@ class FLAME2Dataset(BaseDataset):
         构建6通道数据增强流水线
         核心：所有增强操作同时作用于RGB和IR通道（保持模态一致性）
         """
-        from .augment import (
-            RandomFlip,
-            RandomPerspective,
-            MixUp,
-            Mosaic,
-            LetterBox,
-        )
+        from .augment import RandomFlip, MixUp, Mosaic, LetterBox
         
         # 核心修复：Mosaic/RandomPerspective 期望 imgsz 为整数
         # 如果传入的是列表 [H, W]，取其最大值作为增强基准尺寸
@@ -894,14 +888,6 @@ class FLAME2Dataset(BaseDataset):
             
         transforms = Compose([
             RandomFlip(direction="horizontal", p=hyp.flipud),
-            RandomPerspective(
-                degrees=hyp.degrees,
-                translate=hyp.translate,
-                scale=hyp.scale,
-                shear=hyp.shear,
-                perspective=hyp.perspective,
-                border=(-imgsz // 2, -imgsz // 2),
-            ),
             MixUp(dataset, p=hyp.mixup),
             LetterBox(new_shape=(imgsz, imgsz), scaleup=False),
         ])
