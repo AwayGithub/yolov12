@@ -661,9 +661,9 @@ class FLAME2Dataset(BaseDataset):
         rgb_img = self.load_image(rgb_file)
         thermal_img = self.load_image(thermal_file)
         
-        # 始终返回 6 通道图像 (RGB + IR)
+        # 始终返回 6 通道图像 (VIS + IR)
         # 即使在单模态模式下，也保留双模态图像用于可视化
-        img = np.concatenate([rgb_img, thermal_img], axis=-1)
+        img = np.concatenate([rgb_img, thermal_img], axis=-1) # VIS_BGR IR_BGR
 
         # 构建标准的 label 字典
         label.update({
@@ -691,11 +691,9 @@ class FLAME2Dataset(BaseDataset):
         """加载单模态图像（RGB/IR），返回HWC格式numpy数组 (BGR)"""
         if not img_path.exists():
             raise FileNotFoundError(f"图像文件不存在: {img_path}")
-        img = cv2.imread(str(img_path))
+        img = cv2.imread(str(img_path)) # BGR, RandomHSV 等增强操作期望 BGR，且 plot_images 也期望 BGR
         if img is None:
             raise ValueError(f"无法读取图像: {img_path}")
-        # 移除 cvtColor(img, cv2.COLOR_BGR2RGB)，保持 BGR 格式
-        # 因为 RandomHSV 等增强操作期望 BGR，且 plot_images 也期望 BGR
         img = cv2.resize(img, (self.img_size[1], self.img_size[0]))
         return img
 
@@ -845,6 +843,7 @@ class FLAME2Dataset(BaseDataset):
         """
         重载数据增强：适配6通道图像
         核心修改：确保增强操作兼容6通道（而非默认3通道）
+        顺序：_build_6channel_transforms -> Format
         """
         if self.augment:
             hyp.mosaic = hyp.mosaic if self.augment and not self.rect else 0.0
@@ -853,7 +852,10 @@ class FLAME2Dataset(BaseDataset):
             transforms = self._build_6channel_transforms(self, self.imgsz, hyp)
         else:
             # 验证阶段仅做尺寸调整
-            transforms = Compose([LetterBox(new_shape=(self.imgsz, self.imgsz), scaleup=False)])
+            size = self.imgsz
+            if isinstance(size, (list, tuple)):
+                size = max(size)
+            transforms = Compose([LetterBox(new_shape=(size, size), scaleup=False)])
         
         # 格式转换：适配6通道输出
         transforms.append(
@@ -866,7 +868,8 @@ class FLAME2Dataset(BaseDataset):
                 batch_idx=True,
                 mask_ratio=hyp.mask_ratio if hyp else 4,
                 mask_overlap=hyp.overlap_mask if hyp else 0.5,
-                bgr=hyp.bgr if (hyp and self.augment) else 0.0,
+                # bgr=hyp.bgr if (hyp and self.augment) else 0.0, # bgr是通道不反转的概率
+                bgr=0.0, # 设置为始终反转, 即输入为 RGB(IR)RGB(VIS)
             )
         )
         return transforms
@@ -881,6 +884,7 @@ class FLAME2Dataset(BaseDataset):
             RandomPerspective,
             MixUp,
             Mosaic,
+            LetterBox,
         )
         
         # 核心修复：Mosaic/RandomPerspective 期望 imgsz 为整数
@@ -899,6 +903,7 @@ class FLAME2Dataset(BaseDataset):
                 border=(-imgsz // 2, -imgsz // 2),
             ),
             MixUp(dataset, p=hyp.mixup),
+            LetterBox(new_shape=(imgsz, imgsz), scaleup=False),
         ])
         return transforms
 
@@ -1034,14 +1039,9 @@ class RGBT3MDataset(FLAME2Dataset):
         rgb_img = self.load_image(rgb_file)
         thermal_img = self.load_image(thermal_file) # IR 已经是 3 通道且数值相等
         
-        if self.input_mode == "dual_input":
-            img = np.concatenate([rgb_img, thermal_img], axis=-1)
-        elif self.input_mode == "rgb_input":
-            img = rgb_img
-        elif self.input_mode == "ir_input":
-            img = thermal_img
-        else:
-            img = np.concatenate([rgb_img, thermal_img], axis=-1)
+        # 始终构造 6 通道图像 (RGB + IR)，具体输入给模型的模态
+        # 由 Trainer/Validator 中的 input_mode 控制切片
+        img = np.concatenate([rgb_img, thermal_img], axis=-1)
 
         label.update({
             "img": img,

@@ -22,8 +22,8 @@ sample = dataset[id]
 img_hwc = sample['img'].permute(1, 2, 0).cpu().numpy().astype(np.float32) / 255.0
 
 # 2. 分离 RGB 和 IR 通道
-ir_view = img_hwc[:, :, 0:3][:, :, ::-1]
-rgb_view = img_hwc[:, :, 3:6][:, :, ::-1]
+ir_view = img_hwc[:, :, 0:3]    # RGB
+rgb_view = img_hwc[:, :, 3:6]   # RGB
 
 # 3. 获取标注框 (Shape: [6, 4]，格式为归一化的 xywh)
 bboxes = sample['bboxes'].cpu().numpy()

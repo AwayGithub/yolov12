@@ -26,6 +26,7 @@ thermal_dir: IR                   # IR 图像目录
 label_dir: labels                 # YOLO 格式标注目录
 
 # 6. 图像尺寸 (H, W)
+# 用于控制数据集标准化时的目标尺寸
 img_size: [480, 640]
 
 # 7. 标注格式

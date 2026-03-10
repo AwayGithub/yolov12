@@ -1,62 +1,47 @@
-import os
-import torch
-from ultralytics.data.build import build_yolo_dataset
+from ultralytics.data.dataset import RGBT3MDataset
 from ultralytics.utils import yaml_load
-from ultralytics.utils.checks import check_yaml
+import matplotlib.pyplot as plt
+import matplotlib.patches as patches
+import numpy as np
 
-def test_rgbt3m_dataset():
-    # 模拟 cfg 对象
-    class Config:
-        def __init__(self):
-            self.imgsz = [480, 640]
-            self.rect = False
-            self.cache = None
-            self.single_cls = False
-            self.task = "detect"
-            self.classes = None
-            self.fraction = 1.0
-            self.mosaic = 1.0
-            self.mixup = 0.0
-            self.hsv_h = 0.015
-            self.hsv_s = 0.7
-            self.hsv_v = 0.4
-            self.degrees = 0.0
-            self.translate = 0.1
-            self.scale = 0.5
-            self.shear = 0.0
-            self.perspective = 0.0
-            self.flipud = 0.0
-            self.fliplr = 0.5
-            self.mask_ratio = 4
-            self.overlap_mask = True
-            self.bgr = 0.0
-            self.input_mode = "dual_input"
+cfg = yaml_load("ultralytics/cfg/datasets/RGBT-3M.yaml")
+dataset = RGBT3MDataset(
+    img_path=cfg["train"],
+    imgsz=cfg["img_size"],
+    data=cfg,
+    task="detect",
+    augment=False,
+)
 
-    cfg = Config()
-    
-    # 加载数据集 YAML
-    data_path = r"e:\Yan-Unifiles\lab\exp\yolov12\ultralytics\cfg\datasets\RGBT-3M.yaml"
-    data = yaml_load(data_path)
-    data["path"] = r"e:\Yan-Unifiles\lab\exp\yolov12\RGBT-3M" # 确保路径正确
-    
-    # 模拟 img_path (train.txt)
-    img_path = os.path.join(data["path"], data["train"])
-    
-    print(f"开始构建 RGBT3MDataset...")
-    dataset = build_yolo_dataset(cfg, img_path, batch=4, data=data, mode="train")
-    
-    print(f"数据集大小: {len(dataset)}")
-    
-    # 获取第一个样本
-    sample = dataset[0]
-    img = sample["img"]
-    
-    print(f"样本图像形状 (C, H, W): {img.shape}")
-    print(f"样本标注: {sample['cls']}, {sample['bboxes']}")
-    
-    # 验证通道数
-    assert img.shape[0] == 6, f"预期 6 通道，但得到 {img.shape[0]} 通道"
-    print("验证通过: RGBT3MDataset 成功加载 6 通道数据。")
-
-if __name__ == "__main__":
-    test_rgbt3m_dataset()
+id = 0
+sample = dataset[id]
+img_hwc = sample["img"].permute(1, 2, 0).cpu().numpy().astype(np.float32) / 255.0
+ir_view = img_hwc[:, :, 0:3]
+rgb_view = img_hwc[:, :, 3:6]
+print(ir_view.shape, rgb_view.shape)
+bboxes = sample["bboxes"].cpu().numpy()
+h, w = img_hwc.shape[:2]
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 6))
+ax1.imshow(rgb_view)
+ax1.set_title(f"RGB Modality (ID: {id})")
+ax1.axis("off")
+ax2.imshow(ir_view)
+for box in bboxes:
+    xc, yc, bw, bh = box
+    x_left = (xc - bw / 2) * w
+    y_top = (yc - bh / 2) * h
+    rect_w = bw * w
+    rect_h = bh * h
+    rect = patches.Rectangle(
+        (x_left, y_top),
+        rect_w,
+        rect_h,
+        linewidth=2,
+        edgecolor="r",
+        facecolor="none",
+    )
+    ax2.add_patch(rect)
+ax2.set_title("IR Modality with BBoxes")
+ax2.axis("off")
+plt.tight_layout()
+plt.show()

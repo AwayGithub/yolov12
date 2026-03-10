@@ -57,13 +57,13 @@ class DetectionValidator(BaseValidator):
         # 处理单模态输入 (RGBT-3M/FLAME2 为 6 通道输入)
         input_mode = self.data.get("input_mode", "dual_input")
         if batch["img"].shape[1] == 6 and input_mode != "dual_input":
-            # 备份完整的 6 通道数据用于可视化 (0:3 为 RGB, 3:6 为 IR)
+            # 备份完整的 6 通道数据用于可视化 (0:3 为 IR, 3:6 为 RGB)
             batch["img_full"] = batch["img"].clone()
             # 为模型输入进行切片
             if input_mode == "rgb_input":
-                batch["img"] = batch["img"][:, 0:3, ...] # 仅保留 RGB 通道
+                batch["img"] = batch["img"][:, 3:6, ...] # 仅保留 RGB 通道
             elif input_mode == "ir_input":
-                batch["img"] = batch["img"][:, 3:6, ...] # 仅保留 IR 通道
+                batch["img"] = batch["img"][:, 0:3, ...] # 仅保留 IR 通道
 
         if self.args.save_hybrid:
             height, width = batch["img"].shape[2:]
@@ -256,29 +256,179 @@ class DetectionValidator(BaseValidator):
 
     def plot_val_samples(self, batch, ni):
         """Plot validation image samples."""
-        plot_images(
-            batch.get("img_full", batch["img"]),
-            batch["batch_idx"],
-            batch["cls"].squeeze(-1),
-            batch["bboxes"],
-            paths=batch["im_file"],
-            fname=self.save_dir / f"val_epoch{self.epoch}_batch{ni}_labels.jpg",
-            names=self.names,
-            on_plot=self.on_plot,
-            input_mode=self.data.get("input_mode", "dual_input"),
-        )
+        images = batch.get("img_full", batch["img"])
+        input_mode = self.data.get("input_mode", "dual_input")
+        batch_idx = batch["batch_idx"]
+        cls = batch["cls"].squeeze(-1)
+        bboxes = batch["bboxes"]
+        base_fname = self.save_dir / f"val_epoch{self.epoch}_batch{ni}_labels.jpg"
+        if images.shape[1] == 6:
+            if input_mode == "dual_input":
+                images_rgb = images[:, 3:6, ...]
+                plot_images(
+                    images_rgb,
+                    batch_idx,
+                    cls,
+                    bboxes,
+                    paths=batch["im_file"],
+                    fname=base_fname,
+                    names=self.names,
+                    on_plot=self.on_plot,
+                    input_mode=input_mode,
+                )
+                images_ir = images[:, 0:3, ...]
+                fname_ir = self.save_dir / f"val_epoch{self.epoch}_batch{ni}_labels_ir.jpg"
+                plot_images(
+                    images_ir,
+                    batch_idx,
+                    cls,
+                    bboxes,
+                    paths=batch["im_file"],
+                    fname=fname_ir,
+                    names=self.names,
+                    on_plot=self.on_plot,
+                    input_mode=input_mode,
+                )
+            elif input_mode == "rgb_input":
+                images_rgb = images[:, 3:6, ...]
+                plot_images(
+                    images_rgb,
+                    batch_idx,
+                    cls,
+                    bboxes,
+                    paths=batch["im_file"],
+                    fname=base_fname,
+                    names=self.names,
+                    on_plot=self.on_plot,
+                    input_mode=input_mode,
+                )
+            elif input_mode == "ir_input":
+                images_ir = images[:, 0:3, ...]
+                plot_images(
+                    images_ir,
+                    batch_idx,
+                    cls,
+                    bboxes,
+                    paths=batch["im_file"],
+                    fname=base_fname,
+                    names=self.names,
+                    on_plot=self.on_plot,
+                    input_mode=input_mode,
+                )
+            else:
+                plot_images(
+                    images,
+                    batch_idx,
+                    cls,
+                    bboxes,
+                    paths=batch["im_file"],
+                    fname=base_fname,
+                    names=self.names,
+                    on_plot=self.on_plot,
+                    input_mode=input_mode,
+                )
+        else:
+            plot_images(
+                images,
+                batch_idx,
+                cls,
+                bboxes,
+                paths=batch["im_file"],
+                fname=base_fname,
+                names=self.names,
+                on_plot=self.on_plot,
+                input_mode=input_mode,
+            )
 
     def plot_predictions(self, batch, preds, ni):
         """Plots predicted bounding boxes on input images and saves the result."""
-        plot_images(
-            batch.get("img_full", batch["img"]),
-            *output_to_target(preds, max_det=self.args.max_det),
-            paths=batch["im_file"],
-            fname=self.save_dir / f"val_epoch{self.epoch}_batch{ni}_pred.jpg",
-            names=self.names,
-            on_plot=self.on_plot,
-            input_mode=self.data.get("input_mode", "dual_input"),
-        )  # pred
+        images = batch.get("img_full", batch["img"])
+        input_mode = self.data.get("input_mode", "dual_input")
+        batch_idx, cls, bboxes, confs = output_to_target(preds, max_det=self.args.max_det)
+        base_fname = self.save_dir / f"val_epoch{self.epoch}_batch{ni}_pred.jpg"
+        if images.shape[1] == 6:
+            if input_mode == "dual_input":
+                images_rgb = images[:, 3:6, ...]
+                plot_images(
+                    images_rgb,
+                    batch_idx,
+                    cls,
+                    bboxes,
+                    confs=confs,
+                    paths=batch["im_file"],
+                    fname=base_fname,
+                    names=self.names,
+                    on_plot=self.on_plot,
+                    input_mode=input_mode,
+                )
+                images_ir = images[:, 0:3, ...]
+                fname_ir = self.save_dir / f"val_epoch{self.epoch}_batch{ni}_pred_ir.jpg"
+                plot_images(
+                    images_ir,
+                    batch_idx,
+                    cls,
+                    bboxes,
+                    confs=confs,
+                    paths=batch["im_file"],
+                    fname=fname_ir,
+                    names=self.names,
+                    on_plot=self.on_plot,
+                    input_mode=input_mode,
+                )
+            elif input_mode == "rgb_input":
+                images_rgb = images[:, 3:6, ...]
+                plot_images(
+                    images_rgb,
+                    batch_idx,
+                    cls,
+                    bboxes,
+                    confs=confs,
+                    paths=batch["im_file"],
+                    fname=base_fname,
+                    names=self.names,
+                    on_plot=self.on_plot,
+                    input_mode=input_mode,
+                )
+            elif input_mode == "ir_input":
+                images_ir = images[:, 0:3, ...]
+                plot_images(
+                    images_ir,
+                    batch_idx,
+                    cls,
+                    bboxes,
+                    confs=confs,
+                    paths=batch["im_file"],
+                    fname=base_fname,
+                    names=self.names,
+                    on_plot=self.on_plot,
+                    input_mode=input_mode,
+                )
+            else:
+                plot_images(
+                    images,
+                    batch_idx,
+                    cls,
+                    bboxes,
+                    confs=confs,
+                    paths=batch["im_file"],
+                    fname=base_fname,
+                    names=self.names,
+                    on_plot=self.on_plot,
+                    input_mode=input_mode,
+                )
+        else:
+            plot_images(
+                images,
+                batch_idx,
+                cls,
+                bboxes,
+                confs=confs,
+                paths=batch["im_file"],
+                fname=base_fname,
+                names=self.names,
+                on_plot=self.on_plot,
+                input_mode=input_mode,
+            )
 
     def save_one_txt(self, predn, save_conf, shape, file):
         """Save YOLO detections to a txt file in normalized coordinates in a specific format."""
