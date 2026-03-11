@@ -36,4 +36,5 @@ if __name__ == "__main__":
         warmup_momentum=0.8,
         warmup_bias_lr=0.0,
         cos_lr=False,
+        val_period=5,
     )
