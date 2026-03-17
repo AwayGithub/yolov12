@@ -1199,19 +1199,20 @@ class AAttn(nn.Module):
     """
 
     def __init__(self, dim, num_heads, area=1):
+        # 对于 nano 模型, dim=64, num_heads=2, area=4
         """Initializes the area-attention module, a simple yet efficient attention module for YOLO."""
         super().__init__()
         self.area = area
 
         self.num_heads = num_heads
-        self.head_dim = head_dim = dim // num_heads
-        all_head_dim = head_dim * self.num_heads
+        self.head_dim = head_dim = dim // num_heads  # 64//2=32
+        all_head_dim = head_dim * self.num_heads     # 32*2=64
 
-        self.qk = Conv(dim, all_head_dim * 2, 1, act=False)
-        self.v = Conv(dim, all_head_dim, 1, act=False)
-        self.proj = Conv(all_head_dim, dim, 1, act=False)
+        self.qk = Conv(dim, all_head_dim * 2, 1, act=False) # Conv(64,128,1,act=False)
+        self.v = Conv(dim, all_head_dim, 1, act=False)      # Conv(64, 64,1,act=False)
+        self.proj = Conv(all_head_dim, dim, 1, act=False)   # Conv(64, 64,1,act=False)
 
-        self.pe = Conv(all_head_dim, dim, 5, 1, 2, g=dim, act=False)
+        self.pe = Conv(all_head_dim, dim, 5, 1, 2, g=dim, act=False)    # Conv(64,64,5,1,2,g=64,act=False)
 
 
     def forward(self, x):
@@ -1289,12 +1290,14 @@ class ABlock(nn.Module):
     """
 
     def __init__(self, dim, num_heads, mlp_ratio=1.2, area=1):
+        # 对于 nano 模型, dim=64, num_heads=2, mlp_ratio=2.0, area=4
         """Initializes the ABlock with area-attention and feed-forward layers for faster feature extraction."""
         super().__init__()
 
-        self.attn = AAttn(dim, num_heads=num_heads, area=area)
-        mlp_hidden_dim = int(dim * mlp_ratio)
+        self.attn = AAttn(dim, num_heads=num_heads, area=area)  # Attn(dim=64,num_heads=2,area=4)
+        mlp_hidden_dim = int(dim * mlp_ratio)   # 64*2.0=128
         self.mlp = nn.Sequential(Conv(dim, mlp_hidden_dim, 1), Conv(mlp_hidden_dim, dim, 1, act=False))
+        # mlp = Conv(64,128,1) -> Conv(128,64,1,act=False)
 
         self.apply(self._init_weights)
 
@@ -1343,6 +1346,7 @@ class A2C2f(nn.Module):
     """
 
     def __init__(self, c1, c2, n=1, a2=True, area=1, residual=False, mlp_ratio=2.0, e=0.5, g=1, shortcut=True):
+        # 对于 nano 模型, c1=c2=128, n=2, a2=True, area=4
         super().__init__()
         c_ = int(c2 * e)  # hidden channels
         assert c_ % 32 == 0, "Dimension of ABlock be a multiple of 32."
@@ -1350,14 +1354,18 @@ class A2C2f(nn.Module):
         # num_heads = c_ // 64 if c_ // 64 >= 2 else c_ // 32
         num_heads = c_ // 32
 
-        self.cv1 = Conv(c1, c_, 1, 1)
-        self.cv2 = Conv((1 + n) * c_, c2, 1)  # optional act=FReLU(c2)
+        self.cv1 = Conv(c1, c_, 1, 1)         # cv1 = Conv(128,64,1,1)
+        self.cv2 = Conv((1 + n) * c_, c2, 1)  # cv2 = Conv((1+2)*64,128,1) = Conv(192,128,1)
+                                              # optional act=FReLU(c2)
 
         init_values = 0.01  # or smaller
-        self.gamma = nn.Parameter(init_values * torch.ones((c2)), requires_grad=True) if a2 and residual else None
+        self.gamma = nn.Parameter(init_values * torch.ones((c2)), requires_grad=True) if a2 and residual else None  # gamma = None
 
-        self.m = nn.ModuleList(
-            nn.Sequential(*(ABlock(c_, num_heads, mlp_ratio, area) for _ in range(2))) if a2 else C3k(c_, c_, 2, shortcut, g) for _ in range(n)
+        self.m = nn.ModuleList(               # (ABlock(64,2,2.0,4), ABlock(64,2,2.0,4)) * 2
+            nn.Sequential(*(ABlock(c_, num_heads, mlp_ratio, area) for _ in range(2))) 
+            if a2 
+            else C3k(c_, c_, 2, shortcut, g) 
+            for _ in range(n)
         )
 
     def forward(self, x):

@@ -538,8 +538,8 @@ class Mosaic(BaseMixTransform):
         assert 0 <= p <= 1.0, f"The probability should be in range [0, 1], but got {p}."
         assert n in {4, 9}, "grid must be equal to 4 or 9."
         super().__init__(dataset=dataset, p=p)
-        self.imgsz = imgsz
-        self.border = (-imgsz // 2, -imgsz // 2)  # width, height
+        self.imgsz = max(imgsz) if isinstance(imgsz, (list, tuple)) else imgsz
+        self.border = (-self.imgsz // 2, -self.imgsz // 2)  # width, height
         self.n = n
 
     def get_indexes(self, buffer=True):
@@ -2307,13 +2307,17 @@ def v8_transforms(dataset, imgsz, hyp, stretch=False):
         >>> augmented_data = transforms(dataset[0])
     """
     mosaic = Mosaic(dataset, imgsz=imgsz, p=hyp.mosaic)
+    
+    # Handle rectangular imgsz if passed as list/tuple
+    new_shape = tuple(imgsz) if isinstance(imgsz, (list, tuple)) else (imgsz, imgsz)
+    
     affine = RandomPerspective(
         degrees=hyp.degrees,
         translate=hyp.translate,
         scale=hyp.scale,
         shear=hyp.shear,
         perspective=hyp.perspective,
-        pre_transform=None if stretch else LetterBox(new_shape=(imgsz, imgsz)),
+        pre_transform=None if stretch else LetterBox(new_shape=new_shape),
     )
 
     pre_transform = Compose([mosaic, affine])

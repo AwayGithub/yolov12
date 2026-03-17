@@ -854,8 +854,10 @@ class FLAME2Dataset(BaseDataset):
             # 验证阶段仅做尺寸调整
             size = self.imgsz
             if isinstance(size, (list, tuple)):
-                size = max(size)
-            transforms = Compose([LetterBox(new_shape=(size, size), scaleup=False)])
+                new_shape = tuple(size)
+            else:
+                new_shape = (size, size)
+            transforms = Compose([LetterBox(new_shape=new_shape, scaleup=False)])
         
         # 格式转换：适配6通道输出
         transforms.append(
@@ -882,14 +884,16 @@ class FLAME2Dataset(BaseDataset):
         from .augment import RandomFlip, MixUp, Mosaic, LetterBox
         
         # 核心修复：Mosaic/RandomPerspective 期望 imgsz 为整数
-        # 如果传入的是列表 [H, W]，取其最大值作为增强基准尺寸
+        # 如果传入的是列表 [H, W]，这里应该让 LetterBox 接收 (H, W) 的元组，而不是强制转为最大值的正方形
         if isinstance(imgsz, (list, tuple)):
-            imgsz = max(imgsz)
+            new_shape = tuple(imgsz)
+        else:
+            new_shape = (imgsz, imgsz)
             
         transforms = Compose([
             RandomFlip(direction="horizontal", p=hyp.flipud),
             # MixUp(dataset, p=hyp.mixup),
-            LetterBox(new_shape=(imgsz, imgsz), scaleup=False),
+            LetterBox(new_shape=new_shape, scaleup=False),
         ])
         return transforms
 

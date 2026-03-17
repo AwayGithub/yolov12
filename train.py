@@ -23,8 +23,8 @@ if __name__ == "__main__":
     results = model.train(
         data=data_cfg,
         epochs=300,
-        imgsz=256,  # 输入模型的尺寸，也是验证的尺寸
-        batch=64,
+        imgsz=[480, 640],  # 输入模型的尺寸，也是验证的尺寸
+        batch=2,
         workers=0,
         device=0,
         optimizer="SGD",
@@ -36,5 +36,5 @@ if __name__ == "__main__":
         warmup_momentum=0.8,
         warmup_bias_lr=0.0,
         cos_lr=False,
-        val_period=5,
+        val_period=1,
     )

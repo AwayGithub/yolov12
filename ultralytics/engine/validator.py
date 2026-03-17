@@ -101,7 +101,7 @@ class BaseValidator:
         (self.save_dir / "labels" if self.args.save_txt else self.save_dir).mkdir(parents=True, exist_ok=True)
         if self.args.conf is None:
             self.args.conf = 0.001  # default conf=0.001
-        self.args.imgsz = check_imgsz(self.args.imgsz, max_dim=1)
+        self.args.imgsz = check_imgsz(self.args.imgsz, max_dim=2)
 
         self.plots = {}
         self.callbacks = _callbacks or callbacks.get_default_callbacks()
@@ -150,8 +150,9 @@ class BaseValidator:
                 self.args.batch = model.batch_size
             elif not pt and not jit:
                 self.args.batch = model.metadata.get("batch", 1)  # export.py models default to batch-size 1
+                imgsz_str = f"{imgsz[0]}, {imgsz[1]}" if isinstance(imgsz, (list, tuple)) else f"{imgsz}, {imgsz}"
                 LOGGER.info(
-                    f"Setting batch={self.args.batch} input of shape ({self.args.batch}, {channels}, {imgsz}, {imgsz})"
+                    f"Setting batch={self.args.batch} input of shape ({self.args.batch}, {channels}, {imgsz_str})"
                 )
 
             if isinstance(self.args.data, dict):
@@ -171,7 +172,8 @@ class BaseValidator:
             self.dataloader = self.dataloader or self.get_dataloader(self.data.get(self.args.split), self.args.batch)
 
             model.eval()
-            model.warmup(imgsz=(1 if pt else self.args.batch, channels, imgsz, imgsz))  # warmup
+            warmup_shape = (1 if pt else self.args.batch, channels, *imgsz) if isinstance(imgsz, (list, tuple)) else (1 if pt else self.args.batch, channels, imgsz, imgsz)
+            model.warmup(imgsz=warmup_shape)  # warmup
 
         self.run_callbacks("on_val_start")
         if self.args.plots:
