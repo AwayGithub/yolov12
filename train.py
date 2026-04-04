@@ -19,7 +19,7 @@ if __name__ == "__main__":
     data_cfg = yaml_load("ultralytics/cfg/datasets/RGBT-3M.yaml")
     data_cfg["input_mode"] = args.input_mode
 
-    model = YOLO("yolov12n.yaml")
+    model = YOLO("yolov12-dual.yaml")  # n scale（scales dict 第一个）
     results = model.train(
         data=data_cfg,
         epochs=300,

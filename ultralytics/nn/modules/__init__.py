@@ -58,6 +58,7 @@ from .block import (
     SCDown,
     TorchVision,
     A2C2f,
+    CrossModalGating,
 )
 from .conv import (
     CBAM,
@@ -161,5 +162,6 @@ __all__ = (
     "PSA",
     "TorchVision",
     "Index",
-    "A2C2f"
+    "A2C2f",
+    "CrossModalGating",
 )

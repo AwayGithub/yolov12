@@ -10,7 +10,7 @@ import torch.nn as nn
 from ultralytics.data import build_dataloader, build_yolo_dataset
 from ultralytics.engine.trainer import BaseTrainer
 from ultralytics.models import yolo
-from ultralytics.nn.tasks import DetectionModel
+from ultralytics.nn.tasks import DetectionModel, DualStreamDetectionModel, yaml_model_load
 from ultralytics.utils import LOGGER, RANK
 from ultralytics.utils.plotting import plot_images, plot_labels, plot_results
 from ultralytics.utils.torch_utils import de_parallel, torch_distributed_zero_first
@@ -146,11 +146,17 @@ class DetectionTrainer(BaseTrainer):
 
     def get_model(self, cfg=None, weights=None, verbose=True):
         """Return a YOLO detection model."""
-        # 根据 input_mode 确定输入通道数
         input_mode = self.data.get("input_mode", "dual_input")
         ch = 6 if input_mode == "dual_input" else 3
-        
-        model = DetectionModel(cfg, ch=ch, nc=self.data["nc"], verbose=verbose and RANK == -1)
+
+        # 检查 YAML 是否指定双分支模式
+        yaml_cfg = yaml_model_load(cfg) if isinstance(cfg, str) else cfg
+        use_dual_stream = yaml_cfg.get("dual_stream", False) if yaml_cfg else False
+
+        if use_dual_stream and input_mode == "dual_input":
+            model = DualStreamDetectionModel(cfg, ch=ch, nc=self.data["nc"], verbose=verbose and RANK == -1)
+        else:
+            model = DetectionModel(cfg, ch=ch, nc=self.data["nc"], verbose=verbose and RANK == -1)
         if weights:
             model.load(weights)
         return model

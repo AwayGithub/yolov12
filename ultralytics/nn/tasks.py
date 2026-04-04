@@ -65,6 +65,7 @@ from ultralytics.nn.modules import (
     WorldDetect,
     v10Detect,
     A2C2f,
+    CrossModalGating,
 )
 from ultralytics.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, colorstr, emojis, yaml_load
 from ultralytics.utils.checks import check_requirements, check_suffix, check_yaml
@@ -388,6 +389,151 @@ class DetectionModel(BaseModel):
     def init_criterion(self):
         """Initialize the loss criterion for the DetectionModel."""
         return E2EDetectLoss(self) if getattr(self, "end2end", False) else v8DetectionLoss(self)
+
+
+class DualStreamDetectionModel(DetectionModel):
+    """双分支 RGB-IR 中期融合检测模型（Option B，ADR-001）。
+
+    架构：两个独立 backbone 分别处理 RGB 和 IR（各 3 通道），
+    在 P3/P4/P5 concat + 1×1 conv 融合后送入共享 neck+head。
+    可选在 P4/P5 加 CrossModalGating（由 YAML 的 cmg_stages 控制）。
+    """
+
+    # backbone 中 P3/P4/P5 特征的输出层全局索引（对应 yolov12-dual.yaml）
+    FUSION_LAYER_INDICES = {"p3": 4, "p4": 6, "p5": 8}
+
+    def __init__(self, cfg="yolov12-dual.yaml", ch=None, nc=None, verbose=True):
+        nn.Module.__init__(self)
+
+        self.yaml = cfg if isinstance(cfg, dict) else yaml_model_load(cfg)
+        if nc and nc != self.yaml["nc"]:
+            LOGGER.info(f"Overriding model.yaml nc={self.yaml['nc']} with nc={nc}")
+            self.yaml["nc"] = nc
+
+        # 每个分支只处理 3 通道
+        self.yaml["ch"] = 3
+
+        # cmg_stages 控制哪些层级做 CrossModalGating（[] = 无 CMG，Exp-1）
+        self._cmg_stages = set(self.yaml.get("cmg_stages", []))
+
+        # 构建完整模型用于解析结构（backbone + neck + head）
+        full_model, self.save = parse_model(deepcopy(self.yaml), ch=3, verbose=verbose)
+
+        backbone_end = max(self.FUSION_LAYER_INDICES.values()) + 1  # 9
+
+        # RGB 分支用原始 backbone
+        self.backbone_rgb = nn.Sequential(*list(full_model.children())[:backbone_end])
+        # IR 分支独立权重
+        self.backbone_ir = deepcopy(self.backbone_rgb)
+
+        # 共享 neck + head
+        self.head = nn.Sequential(*list(full_model.children())[backbone_end:])
+
+        # 跨模态门控（仅在 cmg_stages 指定的层级，Exp-1 为空）
+        self.cmg_modules = nn.ModuleDict()
+        for stage_name in self._cmg_stages:
+            if stage_name not in self.FUSION_LAYER_INDICES:
+                raise ValueError(f"cmg_stages 中的 '{stage_name}' 不在 FUSION_LAYER_INDICES")
+            c_out = self._get_layer_out_channels(self.backbone_rgb[self.FUSION_LAYER_INDICES[stage_name]])
+            self.cmg_modules[stage_name] = nn.ModuleDict({
+                "rgb2ir": CrossModalGating(c_out),
+                "ir2rgb": CrossModalGating(c_out),
+            })
+
+        # P3/P4/P5 融合：concat → 1×1 conv 降维
+        self.fusion_convs = nn.ModuleDict()
+        for stage_name, layer_idx in self.FUSION_LAYER_INDICES.items():
+            c_out = self._get_layer_out_channels(self.backbone_rgb[layer_idx])
+            self.fusion_convs[stage_name] = Conv(c_out * 2, c_out, 1, 1)
+
+        # 保留 self.model 引用（stride 计算 + 兼容 DetectionModel 方法）
+        self.model = full_model
+        self.names = {i: f"{i}" for i in range(self.yaml["nc"])}
+        self.inplace = self.yaml.get("inplace", True)
+        self.end2end = getattr(self.model[-1], "end2end", False)
+
+        # 计算 stride（用 6 通道假输入触发 _predict_once）
+        m = self.model[-1]
+        if isinstance(m, Detect):
+            s = 256
+            m.inplace = self.inplace
+
+            def _forward(x):
+                if self.end2end:
+                    return self.forward(x)["one2many"]
+                return self.forward(x)[0] if isinstance(m, (Segment, Pose, OBB)) else self.forward(x)
+
+            m.stride = torch.tensor([s / x.shape[-2] for x in _forward(torch.zeros(1, 6, s, s))])
+            self.stride = m.stride
+            m.bias_init()
+        else:
+            self.stride = torch.Tensor([32])
+
+        initialize_weights(self)
+        if verbose:
+            self.info()
+            LOGGER.info("")
+
+    @staticmethod
+    def _get_layer_out_channels(layer):
+        """获取层的输出通道数。"""
+        if hasattr(layer, "cv2"):  # C3k2, A2C2f, C2f
+            return layer.cv2.conv.out_channels
+        elif hasattr(layer, "conv"):  # Conv
+            return layer.conv.out_channels
+        raise ValueError(f"Cannot determine output channels for {type(layer)}")
+
+    def _forward_backbone(self, backbone, x):
+        """运行单个 backbone 分支，收集各融合点输出。"""
+        feats = {}
+        y = []
+        for m in backbone:
+            if m.f != -1:
+                x = y[m.f] if isinstance(m.f, int) else [x if j == -1 else y[j] for j in m.f]
+            x = m(x)
+            y.append(x if m.i in self.save else None)
+            for stage_name, layer_idx in self.FUSION_LAYER_INDICES.items():
+                if m.i == layer_idx:
+                    feats[stage_name] = x
+        return feats
+
+    def _predict_once(self, x, profile=False, visualize=False, embed=None):
+        """双分支前向传播。输入 x 形状 (B, 6, H, W)，0:3=IR_RGB, 3:6=VIS_RGB。"""
+        assert x.shape[1] == 6, f"Expected 6-channel input, got {x.shape[1]}"
+        x_ir  = x[:, :3, ...]   # 0:3 = IR_RGB（经 [::-1] 通道反转后）
+        x_rgb = x[:, 3:, ...]   # 3:6 = VIS_RGB
+
+        # 独立运行两个 backbone
+        feats_rgb = self._forward_backbone(self.backbone_rgb, x_rgb)
+        feats_ir  = self._forward_backbone(self.backbone_ir,  x_ir)
+
+        # 跨模态门控（Exp-1 无 CMG，此循环为空）
+        for stage_name in self._cmg_stages:
+            cmg = self.cmg_modules[stage_name]
+            rgb_f = feats_rgb[stage_name]
+            ir_f  = feats_ir[stage_name]
+            feats_rgb[stage_name] = cmg["ir2rgb"](rgb_f, ir_f)
+            feats_ir[stage_name]  = cmg["rgb2ir"](ir_f,  rgb_f)
+
+        # concat + 1×1 conv 融合
+        fused = {}
+        for stage_name in self.FUSION_LAYER_INDICES:
+            cat = torch.cat([feats_rgb[stage_name], feats_ir[stage_name]], dim=1)
+            fused[stage_name] = self.fusion_convs[stage_name](cat)
+
+        # 构造 y 列表供 head 使用跳连索引
+        y = [None] * (max(self.FUSION_LAYER_INDICES.values()) + 1)
+        for stage_name, layer_idx in self.FUSION_LAYER_INDICES.items():
+            y[layer_idx] = fused[stage_name]
+
+        x = fused["p5"]
+        for m in self.head:
+            if m.f != -1:
+                x = y[m.f] if isinstance(m.f, int) else [x if j == -1 else y[j] for j in m.f]
+            x = m(x)
+            y.append(x if m.i in self.save else None)
+
+        return x
 
 
 class OBBModel(DetectionModel):

@@ -1375,3 +1375,25 @@ class A2C2f(nn.Module):
         if self.gamma is not None:
             return x + self.gamma.view(1, -1, 1, 1) * self.cv2(torch.cat(y, 1))
         return self.cv2(torch.cat(y, 1))
+
+
+class CrossModalGating(nn.Module):
+    """跨模态门控：用 guide 模态生成通道注意力权重，调制 target 模态特征。
+
+    轻量设计：GAP + Linear + Sigmoid，残差门控保证信息不丢失。
+    用于双分支融合时在 P4/P5 层级做双向跨模态交互。
+    """
+
+    def __init__(self, channels):
+        super().__init__()
+        self.gate = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Flatten(),
+            nn.Linear(channels, channels),
+            nn.Sigmoid(),
+        )
+
+    def forward(self, target, guide):
+        """target: 被调制的特征, guide: 提供门控信号的特征。"""
+        w = self.gate(guide).unsqueeze(-1).unsqueeze(-1)  # (B, C, 1, 1)
+        return target * w + target  # 残差门控：保底不损失信息
