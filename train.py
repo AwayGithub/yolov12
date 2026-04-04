@@ -11,6 +11,13 @@ def parse_args():
         default="dual_input",
         choices=["dual_input", "rgb_input", "ir_input"],
     )
+    parser.add_argument(
+        "--fusion_stage",
+        type=str,
+        default="middle",
+        choices=["early", "middle"],
+        help="early: 6ch 直接拼接输入单分支; middle: 双分支中期融合",
+    )
     return parser.parse_args()
 
 
@@ -19,7 +26,10 @@ if __name__ == "__main__":
     data_cfg = yaml_load("ultralytics/cfg/datasets/RGBT-3M.yaml")
     data_cfg["input_mode"] = args.input_mode
 
-    model = YOLO("yolov12-dual.yaml")  # n scale（scales dict 第一个）
+    if args.fusion_stage == "middle" and args.input_mode == "dual_input":
+        model = YOLO("yolov12-dual.yaml")  # 双分支中期融合，n scale
+    else:
+        model = YOLO("yolov12.yaml")       # 单分支（early fusion 或单模态）
     results = model.train(
         data=data_cfg,
         epochs=300,
