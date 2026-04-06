@@ -5,7 +5,7 @@
 name: RGBT-3M
 
 # 2. 数据集根路径
-path: e:\Yan-Unifiles\lab\exp\yolov12\RGBT-3M
+path: e:\Yan-Unifiles\lab\exp\yolov12\RGBT-3M # /home/featurize/data/RGBT-3M
 
 # 3. 训练/验证集划分 (使用 sample_subset.py 生成的索引文件)
 train: train.txt
