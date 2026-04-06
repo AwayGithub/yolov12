@@ -418,7 +418,7 @@ class BaseTrainer:
                         )
                     )
                     self.run_callbacks("on_batch_end")
-                    if self.args.plots and i < 3:
+                    if self.args.plots and i < 3 and self.epoch % 10 == 0:
                         self.plot_training_samples(batch, i)
 
                 self.run_callbacks("on_train_batch_end")
