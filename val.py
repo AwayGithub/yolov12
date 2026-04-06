@@ -4,14 +4,22 @@ import time
 from pathlib import Path
 from ultralytics import YOLO
 from ultralytics.utils import yaml_load
+from ultralytics.nn.tasks import DualStreamDetectionModel  # noqa: F401 — 确保自定义类可被 torch.load 反序列化
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Evaluate a trained YOLOv12 RGBT model")
     parser.add_argument(
         "--weights",
         type=str,
-        default=r"runs\detect\RGBT-3M\ir_480640_all\weights\last.pt",
+        default=r"runs\detect\RGBT-3M\dual_MF\weights\best.pt",
         help="Path to the trained model weights"
+    )
+    parser.add_argument(
+        "--fusion_stage",
+        type=str,
+        default="middle",
+        choices=["early", "middle"],
+        help="early: 6ch 单分支; middle: 双分支中期融合",
     )
     parser.add_argument(
         "--input_mode",

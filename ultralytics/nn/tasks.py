@@ -410,8 +410,9 @@ class DualStreamDetectionModel(DetectionModel):
             LOGGER.info(f"Overriding model.yaml nc={self.yaml['nc']} with nc={nc}")
             self.yaml["nc"] = nc
 
-        # 每个分支只处理 3 通道
+        # 每个分支只处理 3 通道，但整体模型接受 6 通道输入
         self.yaml["ch"] = 3
+        self.ch = 6  # 暴露给 validator 用于 warmup shape 推断
 
         # cmg_stages 控制哪些层级做 CrossModalGating（[] = 无 CMG，Exp-1）
         self._cmg_stages = set(self.yaml.get("cmg_stages", []))

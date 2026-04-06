@@ -140,7 +140,9 @@ class BaseValidator:
             stride, pt, jit, engine = model.stride, model.pt, model.jit, model.engine
             imgsz = check_imgsz(self.args.imgsz, stride=stride)
             channels = 3
-            if hasattr(model, "model") and hasattr(model.model, "model"):
+            if hasattr(model, "model") and hasattr(model.model, "backbone_rgb"):
+                channels = 6  # DualStreamDetectionModel: 双分支模型接受 6 通道输入
+            elif hasattr(model, "model") and hasattr(model.model, "model"):
                 m0 = model.model.model[0]
                 if hasattr(m0, "conv"):
                     channels = m0.conv.in_channels
