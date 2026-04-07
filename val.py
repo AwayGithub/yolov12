@@ -79,7 +79,11 @@ if __name__ == "__main__":
     # 3. 注册回调函数以保存所有图片的检测结果图
     model.add_callback("on_val_batch_start", patch_validator_plot_batches)
     
-    # 4. 运行验证
+    # 4. 获取模型信息（参数量、GFLOPs）
+    model_info = model.model.info(verbose=False, imgsz=args.imgsz)
+    n_l, n_p, n_g, flops = model_info
+
+    # 5. 运行验证
     print(f"Running validation with input_mode={args.input_mode}...")
     
     # 存储每次推理的速度信息
@@ -124,6 +128,11 @@ if __name__ == "__main__":
     print("Final Validation Results (Averaged over 10 runs for speed):")
     print("="*50)
     
+    # 模型信息
+    print(f"Parameters: {n_p:,}")
+    print(f"GFLOPs:     {flops:.6f}")
+    print()
+
     # 获取指标 (使用第一次运行的完整结果)
     if hasattr(metrics, "results_dict"):
         results_dict = metrics.results_dict
