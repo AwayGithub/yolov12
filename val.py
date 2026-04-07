@@ -80,8 +80,7 @@ if __name__ == "__main__":
     model.add_callback("on_val_batch_start", patch_validator_plot_batches)
     
     # 4. 获取模型信息（参数量、GFLOPs）
-    model_info = model.model.info(verbose=False, imgsz=args.imgsz)
-    n_l, n_p, n_g, flops = model_info
+    n_l, n_p, n_g, flops = model.model.info(verbose=True, imgsz=args.imgsz)
 
     # 5. 运行验证
     print(f"Running validation with input_mode={args.input_mode}...")
