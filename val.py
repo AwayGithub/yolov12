@@ -1,7 +1,12 @@
 import argparse
 import random
 import time
+from copy import deepcopy
 from pathlib import Path
+
+import torch
+import thop
+
 from ultralytics import YOLO
 from ultralytics.utils import yaml_load
 from ultralytics.nn.tasks import DualStreamDetectionModel  # noqa: F401 — 确保自定义类可被 torch.load 反序列化
@@ -78,9 +83,24 @@ if __name__ == "__main__":
     
     # 3. 注册回调函数以保存所有图片的检测结果图
     model.add_callback("on_val_batch_start", patch_validator_plot_batches)
-    
-    # 4. 获取模型信息（参数量、GFLOPs）
+
+    # 4. 获取模型信息（参数量、GFLOPs）并立即输出
     n_l, n_p, n_g, flops = model.model.info(verbose=True, imgsz=args.imgsz)
+    # model.info() 内部用首个参数的 shape[1] 构造输入，对双分支模型只有 3ch 导致 forward 失败返回 0
+    # 这里用正确的 6ch 输入手动计算
+    if flops == 0.0:
+        m = deepcopy(model.model)
+        stride = max(int(m.stride.max()), 32) if hasattr(m, "stride") else 32
+        im = torch.empty((1, 6, stride, stride), device=next(m.parameters()).device)
+        flops = thop.profile(m, inputs=[im], verbose=False)[0] / 1e9 * 2
+        flops = flops * args.imgsz[0] / stride * args.imgsz[1] / stride
+        del m
+
+    print("\n" + "="*50)
+    print("Model Info:")
+    print(f"  Parameters: {n_p:,}")
+    print(f"  GFLOPs:     {flops:.2f}")
+    print("="*50 + "\n")
 
     # 5. 运行验证
     print(f"Running validation with input_mode={args.input_mode}...")
@@ -122,15 +142,10 @@ if __name__ == "__main__":
         if hasattr(m, "speed"):
             all_speeds.append(m.speed)
     
-    # 5. 输出各项指标和平均推理时间
+    # 6. 输出各项指标和平均推理时间
     print("\n" + "="*50)
     print("Final Validation Results (Averaged over 10 runs for speed):")
     print("="*50)
-    
-    # 模型信息
-    print(f"Parameters: {n_p:,}")
-    print(f"GFLOPs:     {flops:.6f}")
-    print()
 
     # 获取指标 (使用第一次运行的完整结果)
     if hasattr(metrics, "results_dict"):

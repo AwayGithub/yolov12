@@ -1378,22 +1378,43 @@ class A2C2f(nn.Module):
 
 
 class CrossModalGating(nn.Module):
-    """跨模态门控：用 guide 模态生成通道注意力权重，调制 target 模态特征。
+    """跨模态 CBAM 注意力：用 guide 模态生成通道+空间注意力，调制 target 模态特征。
 
-    轻量设计：GAP + Linear + Sigmoid，残差门控保证信息不丢失。
+    参照 CBAM (Woo et al., 2018) 设计：
+    - 通道注意力：GAP+GMP → 共享 MLP → Sigmoid
+    - 空间注意力：channel-wise AvgPool+MaxPool → 7×7 Conv → Sigmoid
+    - 顺序：先通道后空间（CBAM 论文验证的最优排列）
+    - 残差门控保证信息不丢失
     用于双分支融合时在 P4/P5 层级做双向跨模态交互。
     """
 
-    def __init__(self, channels):
+    def __init__(self, channels, reduction=4, spatial_kernel=7):
         super().__init__()
-        self.gate = nn.Sequential(
-            nn.AdaptiveAvgPool2d(1),
-            nn.Flatten(),
-            nn.Linear(channels, channels),
-            nn.Sigmoid(),
+        # Channel attention
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.max_pool = nn.AdaptiveMaxPool2d(1)
+        mid = max(channels // reduction, 1)
+        self.mlp = nn.Sequential(
+            nn.Linear(channels, mid, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Linear(mid, channels, bias=False),
         )
+        # Spatial attention
+        self.spatial_conv = nn.Conv2d(2, 1, spatial_kernel,
+                                      padding=spatial_kernel // 2, bias=False)
 
     def forward(self, target, guide):
-        """target: 被调制的特征, guide: 提供门控信号的特征。"""
-        w = self.gate(guide).unsqueeze(-1).unsqueeze(-1)  # (B, C, 1, 1)
-        return target * w + target  # 残差门控：保底不损失信息
+        """target: 被调制的特征, guide: 提供注意力信号的特征。"""
+        # Channel attention from guide
+        avg_out = self.mlp(self.avg_pool(guide).flatten(1))
+        max_out = self.mlp(self.max_pool(guide).flatten(1))
+        ch_w = torch.sigmoid(avg_out + max_out).unsqueeze(-1).unsqueeze(-1)  # (B, C, 1, 1)
+        target_ca = target * ch_w
+
+        # Spatial attention from guide
+        avg_sp = torch.mean(guide, dim=1, keepdim=True)   # (B, 1, H, W)
+        max_sp = torch.max(guide, dim=1, keepdim=True)[0]  # (B, 1, H, W)
+        sp_w = torch.sigmoid(self.spatial_conv(torch.cat([avg_sp, max_sp], dim=1)))  # (B, 1, H, W)
+        target_sa = target_ca * sp_w
+
+        return target_sa + target  # 残差连接
