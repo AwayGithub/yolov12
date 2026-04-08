@@ -89,12 +89,18 @@ if __name__ == "__main__":
     # model.info() 内部用首个参数的 shape[1] 构造输入，对双分支模型只有 3ch 导致 forward 失败返回 0
     # 这里用正确的 6ch 输入手动计算
     if flops == 0.0:
-        m = deepcopy(model.model)
-        stride = max(int(m.stride.max()), 32) if hasattr(m, "stride") else 32
-        im = torch.empty((1, 6, stride, stride), device=next(m.parameters()).device)
-        flops = thop.profile(m, inputs=[im], verbose=False)[0] / 1e9 * 2
-        flops = flops * args.imgsz[0] / stride * args.imgsz[1] / stride
-        del m
+        try:
+            m = deepcopy(model.model).cpu()
+            stride = max(int(m.stride.max()), 32) if hasattr(m, "stride") else 32
+            im = torch.empty((1, 6, stride, stride))
+            flops = thop.profile(m, inputs=[im], verbose=False)[0] / 1e9 * 2
+            flops = flops * args.imgsz[0] / stride * args.imgsz[1] / stride
+        except Exception:
+            print("Warning: 无法计算 GFLOPs（可能是旧版权重与新代码不兼容）")
+            flops = 0.0
+        finally:
+            del m
+            torch.cuda.empty_cache()
 
     print("\n" + "="*50)
     print("Model Info:")

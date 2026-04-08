@@ -2,7 +2,7 @@
 
 **Status:** In Progress
 **Date:** 2026-04-04
-**Updated:** 2026-04-06
+**Updated:** 2026-04-07
 **Deciders:** 研究者本人
 
 ---
@@ -129,37 +129,70 @@ Input: batch["img"] shape (B, 6, H, W)
 
 ### 第二步：具体代码改动
 
-#### 2.1 新增 CrossModalGating 模块
+#### 2.1 CrossModalGating 模块（CM-CBAM 版，2026-04-07 升级）
 
-**文件:** `ultralytics/nn/modules/block.py` — 追加到文件末尾（约 L1378 之后）
+**文件:** `ultralytics/nn/modules/block.py` — 约 L1380
+
+当前实现为 **CM-CBAM**（Cross-Modal CBAM），参照 CBAM (Woo et al., 2018) 升级自原 SE 式通道门控：
 
 ```python
 class CrossModalGating(nn.Module):
-    """跨模态门控：用 guide 模态生成通道注意力权重，调制 target 模态特征。
+    """跨模态 CBAM 注意力：用 guide 模态生成通道+空间注意力，调制 target 模态特征。
 
-    轻量设计：仅 GAP + 1×1 Conv + Sigmoid，参数量 = c * c + c ≈ c²。
-    对于 c=64 (nano P4)，参数量仅 4160，几乎不影响计算量。
-
-    与 A2C2f 的分工：
-    - A2C2f 负责模态内的全局特征建模（区域注意力）
-    - CMG 负责模态间的互补信息选择性传递（通道门控）
+    参照 CBAM (Woo et al., 2018) 设计：
+    - 通道注意力：GAP+GMP → 共享 MLP → Sigmoid
+    - 空间注意力：channel-wise AvgPool+MaxPool → 7×7 Conv → Sigmoid
+    - 顺序：先通道后空间（CBAM 论文验证的最优排列）
+    - 残差门控保证信息不丢失
     """
-    def __init__(self, channels):
+
+    def __init__(self, channels, reduction=4, spatial_kernel=7):
         super().__init__()
-        self.gate = nn.Sequential(
-            nn.AdaptiveAvgPool2d(1),
-            nn.Flatten(),
-            nn.Linear(channels, channels),
-            nn.Sigmoid()
+        # Channel attention
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.max_pool = nn.AdaptiveMaxPool2d(1)
+        mid = max(channels // reduction, 1)
+        self.mlp = nn.Sequential(
+            nn.Linear(channels, mid, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Linear(mid, channels, bias=False),
         )
+        # Spatial attention
+        self.spatial_conv = nn.Conv2d(2, 1, spatial_kernel,
+                                      padding=spatial_kernel // 2, bias=False)
 
     def forward(self, target, guide):
-        """target: 被调制的特征, guide: 提供门控信号的特征"""
-        w = self.gate(guide).unsqueeze(-1).unsqueeze(-1)  # (B, C, 1, 1)
-        return target * w + target  # 残差门控：保底不损失信息
+        """target: 被调制的特征, guide: 提供注意力信号的特征。"""
+        # Channel attention from guide
+        avg_out = self.mlp(self.avg_pool(guide).flatten(1))
+        max_out = self.mlp(self.max_pool(guide).flatten(1))
+        ch_w = torch.sigmoid(avg_out + max_out).unsqueeze(-1).unsqueeze(-1)
+        target_ca = target * ch_w
+
+        # Spatial attention from guide
+        avg_sp = torch.mean(guide, dim=1, keepdim=True)
+        max_sp = torch.max(guide, dim=1, keepdim=True)[0]
+        sp_w = torch.sigmoid(self.spatial_conv(torch.cat([avg_sp, max_sp], dim=1)))
+        target_sa = target_ca * sp_w
+
+        return target_sa + target  # 残差连接
 ```
 
-**注意:** 使用 `nn.Linear` 而非 `nn.Conv2d(c,c,1)` 是因为 GAP 后空间维度已经是 1×1，语义更清晰。效果完全等价。
+**设计要点：**
+- 所有注意力信号均来自 **guide 模态**（纯跨模态注意力，不是自注意力）
+- 通道注意力用双池化（GAP+GMP）+ 共享 MLP（reduction=4），比原 GAP+Linear(C,C) 参数更少
+- 空间注意力新增，弥补原版只有通道维度门控的不足
+- `tasks.py` 中的调用 `CrossModalGating(c_out)` 完全兼容（新增参数均有默认值）
+
+**参数量对比（nano 规模，每个实例）：**
+
+| 组件 | 原 SE 式 CMG | CM-CBAM (r=4) |
+|------|------------|--------------|
+| P4 (128ch) | 128×128+128 = 16,512 | 2×128×32 + 98 = 8,290 |
+| P5 (256ch) | 256×256+256 = 65,792 | 2×256×64 + 98 = 32,866 |
+| **4 实例合计** | **164,608** | **82,312** |
+
+CM-CBAM 参数量约为原版的 **50%**，同时增加了空间维度注意力。
 
 #### 2.2 新增 DualStreamDetectionModel
 
@@ -485,6 +518,7 @@ x_rgb = x[:, 3:, ...]   # 3:6 = VIS_RGB
 | **Exp-0** | 单分支 6ch early fusion | 0.919 | 0.605 | 0.914 | 0.877 | 2.51M | 4.51 | 已完成 |
 | **Exp-1** | 对称双分支 concat-only (无 CMG) | 0.933 | 0.623 | 0.924 | 0.893 | — | 6.96 | 已完成 |
 | **Exp-2** | **对称双分支 + CMG@P4P5** | **0.934** | **0.627** | **0.925** | **0.894** | **4.21M** | 7.13 | **已完成** |
+| Exp-2b | 对称双分支 + CM-CBAM@P4P5 | 0.927 | 0.627 | 0.925 | 0.882 | 4.13M | 18.91 | 已完成（否定） |
 | Exp-5 | RGB-only 3ch | 0.907 | 0.583 | 0.920 | 0.854 | 2.51M | 4.08 | 已完成 |
 | Exp-6 | IR-only 3ch | 0.887 | 0.564 | 0.888 | 0.831 | 2.51M | 4.33 | 已完成 |
 
@@ -578,6 +612,51 @@ x_rgb = x[:, 3:, ...]   # 3:6 = VIS_RGB
 
 **结论：双分支架构本身（Exp-1）是增益的主要来源（mAP50 +1.4），CMG 仅贡献了边际改善（+0.1）。** 论文应重点论证"独立特征提取 + 层级融合"的架构设计，CMG 作为可选增强模块而非核心贡献。
 
+**针对 CMG 增益不足的改进（2026-04-07）及 Exp-2b 结论（2026-04-08）：**
+
+原 SE 式 CMG 升级为 **CM-CBAM** 后实验结果如下：
+
+### Exp-2b 分类别结果
+
+| 类别 | Images | Instances | Precision | Recall | mAP50 | mAP50-95 |
+|------|--------|-----------|-----------|--------|-------|----------|
+| all | 3366 | 9227 | 0.925 | 0.882 | 0.927 | 0.627 |
+| smoke | 2398 | 4086 | 0.949 | 0.885 | 0.944 | 0.739 |
+| fire | 2606 | 3401 | 0.925 | 0.887 | 0.925 | 0.578 |
+| person | 1243 | 1740 | 0.903 | 0.875 | 0.912 | 0.563 |
+
+### Exp-2b 推理速度（10 次平均）
+
+| 阶段 | 耗时 (ms/image) |
+|------|----------------|
+| Preprocess | 0.5221 |
+| Inference | 16.7253 |
+| Loss | 0.0038 |
+| Postprocess | 1.6602 |
+| **Total** | **18.9114** |
+
+### Exp-2b vs Exp-2 对比分析（CM-CBAM 与 SE-CMG 的对比）
+
+| 指标 | Exp-2 (SE-CMG) | Exp-2b (CM-CBAM) | Δ | 分析 |
+|------|---------------|-----------------|---|------|
+| mAP50 | 0.934 | **0.927** | **-0.7** | 精度反而下降 |
+| mAP50-95 | 0.627 | 0.627 | 0.0 | 持平 |
+| Precision | 0.925 | 0.925 | 0.0 | 持平 |
+| Recall | 0.894 | **0.882** | **-1.2** | 漏检增多 |
+| 参数量 | 4.22M | **4.13M** | -93K | CM-CBAM 参数更少（bottleneck MLP） |
+| 推理耗时 | 7.13ms | **18.9ms** | **+11.8ms (+166%)** | **严重退化** |
+
+**Exp-2b 关键发现：参数减少 ≠ 延时减少（内存访问模式才是瓶颈）**
+
+推理延时增加 2.65× 的根本原因是空间注意力中的 channel-wise 规约：
+```python
+avg_sp = torch.mean(guide, dim=1, keepdim=True)   # 沿 channel 轴规约
+max_sp = torch.max(guide, dim=1, keepdim=True)[0]  # 沿 channel 轴规约
+```
+BCHW 张量沿 `dim=1`（channel 轴）规约需要**跨步（strided）内存访问**，对 GPU cache 极不友好。相比之下，原 SE-CMG 的 `AdaptiveAvgPool2d(1)` 是沿空间轴规约，访问连续内存，有高度优化的 CUDA kernel。CM-CBAM 在 P4+P5 双向共执行 4 次此类规约，造成严重的内存带宽瓶颈。参数量节省（来自 MLP bottleneck）完全被访问开销抵消。
+
+**Exp-2b 结论：CM-CBAM 精度下降 + 推理增加 2.65×，不可取。** SE-CMG 在通道注意力上已足够，增加空间注意力不仅没有提升精度，还引入了难以接受的推理开销。CMG 的改进方向应聚焦于降低通道注意力的计算开销（如用 depthwise conv 替代 Linear），而非叠加空间注意力。
+
 ### 早期分析（2026-03-18 周报）
 
 #### 分类别模态差异
@@ -637,7 +716,8 @@ x_rgb = x[:, 3:, ...]   # 3:6 = VIS_RGB
 | Exp-0 | 单分支 6ch early fusion | 基准 | **已完成** | 0.919 | 0.605 |
 | **Exp-1** | **对称双分支 concat-only (无 CMG)** | **验证双分支本身的增益** | **已完成** | **0.933** | **0.623** |
 | **Exp-2** | **对称双分支 + CMG@P4P5** | **验证跨模态门控的增益** | **已完成** | **0.934** | **0.627** |
-| Exp-3 | 非对称双分支 concat-only (RGB:A2C2f, IR:C3k2) | 验证模态特异化 backbone + 轻量化 | **下一步** | — | — |
+| **Exp-2b** | **对称双分支 + CM-CBAM@P4P5** | **验证 CBAM 式跨模态注意力（通道+空间）的增益** | **已完成** | **0.927** | **0.627** |
+| Exp-3 | 非对称双分支 concat-only (RGB:A2C2f, IR:C3k2) | 验证模态特异化 backbone + 轻量化 | 下一步 | — | — |
 | Exp-4 | 对称双分支 + CMG@P3P4P5 | 验证更多交互点是否有益 | 可选 | — | — |
 | Exp-5 | 单分支 RGB-only (ch=3) | 单模态 baseline | **已完成** | 0.907 | 0.583 |
 | Exp-6 | 单分支 IR-only (ch=3) | 单模态 baseline | **已完成** | 0.887 | 0.564 |
@@ -702,7 +782,7 @@ x_rgb = x[:, 3:, ...]   # 3:6 = VIS_RGB
 - 非对称 backbone 增加了 YAML 配置和模型初始化的复杂度
 
 ### 后续需要重新审视的事
-- ~~如果 CMG 增益不明显，考虑替换为交叉注意力~~ **✓ 已验证 CMG 增益 +0.1 mAP50，确实有限；** 但鉴于增益天花板约 0.935，更复杂的交互模块可能也收益有限，优先转向非对称轻量化（Exp-3）
+- ~~如果 CMG 增益不明显，考虑替换为交叉注意力~~ **✓ Exp-2b 已验证 CM-CBAM 全面劣于 SE-CMG（mAP50 -0.7，推理 +166%）。** 核心教训：channel-wise 空间规约（`torch.max(dim=1)`）对 GPU cache 极不友好，参数量减少不等于推理加速。接受"简单 concat/SE-CMG 已足够"的结论，CMG 不再是研究重点，转向非对称轻量化（Exp-3）
 - 如果非对称双分支效果好，可进一步探索 IR 分支用更窄的通道数（宽度非对称）来压缩参数
 - 如果显存紧张，考虑共享低层 backbone 权重（stage 0-2）
 - 轻量化部署策略需要单独规划
@@ -720,5 +800,6 @@ x_rgb = x[:, 3:, ...]   # 3:6 = VIS_RGB
 6. [x] ~~修改 `get_model()` 支持双分支~~ — 已完成
 7. [x] ~~Exp-1: 对称双分支 concat-only~~ — **mAP50=0.933 (+1.4), mAP50-95=0.623 (+1.8)，显著超越 early fusion**
 8. [x] ~~Exp-2: 对称双分支 + CMG@P4P5~~ — **mAP50=0.934 (+0.1), mAP50-95=0.627 (+0.4)，CMG 增益极小**
-9. [ ] **Exp-3: 非对称双分支 concat-only** — 需新建 `yolov12-dual-asym.yaml`（IR 分支 A2C2f→C3k2），修改模型支持非对称 backbone
-10. [ ] 重点观察非对称方案的推理耗时和 fire 类精度变化
+9. [x] ~~Exp-2b: 对称双分支 + CM-CBAM@P4P5~~ — **mAP50=0.927 (-0.7 vs Exp-2), 推理 18.9ms (+166%)，CM-CBAM 全面劣于 SE-CMG，方案否定**
+10. [ ] **Exp-3: 非对称双分支 concat-only** — 需新建 `yolov12-dual-asym.yaml`（IR 分支 A2C2f→C3k2），修改模型支持非对称 backbone
+11. [ ] 重点观察非对称方案的推理耗时和 fire 类精度变化
