@@ -46,3 +46,29 @@ def test_cross_modal_a2c2f_p5_config():
     x_other = torch.randn(2, 256, 4, 4)
     out = m(x_self, x_other)
     assert out.shape == (2, 256, 4, 4)
+
+
+def test_dual_stream_cma_forward():
+    """DualStreamDetectionModel with cma_stages produces valid output."""
+    from ultralytics.nn.tasks import DualStreamDetectionModel
+
+    model = DualStreamDetectionModel("yolov12-dual.yaml", nc=3)
+    model.eval()
+    x = torch.randn(1, 6, 128, 128)
+    with torch.no_grad():
+        out = model(x)
+    assert out is not None
+
+
+def test_dual_stream_cma_and_cmg_combined():
+    """cma_stages and cmg_stages work simultaneously."""
+    from ultralytics.nn.tasks import DualStreamDetectionModel
+
+    model = DualStreamDetectionModel("yolov12-dual.yaml", nc=3)
+    model.eval()
+    assert len(model.cmg_modules) > 0, "CMG modules should be present"
+    assert len(model._cma_layer_to_stage) > 0, "CMA stages should be configured"
+    x = torch.randn(1, 6, 128, 128)
+    with torch.no_grad():
+        out = model(x)
+    assert out is not None

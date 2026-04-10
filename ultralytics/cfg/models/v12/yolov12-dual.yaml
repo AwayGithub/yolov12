@@ -10,7 +10,8 @@ dual_stream: true
 #   Exp-1 concat-only (无 CMG):    cmg_stages: []
 #   Exp-2 对称 + CMG@P4P5:        cmg_stages: [p4, p5]
 #   Exp-4 对称 + CMG@P3P4P5:      cmg_stages: [p3, p4, p5]
-cmg_stages: [p4, p5]  # Exp-2: CMG@P4P5
+cmg_stages: [p4, p5]  # Exp-2: CMG@P4P5（SE 通道门控，IR 引导 RGB，RGB 引导 IR）
+cma_stages: [p4, p5]  # Exp-4a: CrossModalA2C2f@P4P5（RGB 分支 Q=RGB KV=IR，IR 分支保持自注意力）
 
 scales:
   n: [0.50, 0.25, 1024]
