@@ -66,6 +66,7 @@ from ultralytics.nn.modules import (
     v10Detect,
     A2C2f,
     CrossModalGating,
+    CrossModalA2C2f,
 )
 from ultralytics.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, colorstr, emojis, yaml_load
 from ultralytics.utils.checks import check_requirements, check_suffix, check_yaml
@@ -424,8 +425,28 @@ class DualStreamDetectionModel(DetectionModel):
 
         # RGB 分支用原始 backbone
         self.backbone_rgb = nn.Sequential(*list(full_model.children())[:backbone_end])
-        # IR 分支独立权重
+        # IR 分支独立权重（在 CMA 替换之前 deepcopy，确保 IR 保留标准 A2C2f）
         self.backbone_ir = deepcopy(self.backbone_rgb)
+
+        # CrossModalA2C2f: 将 RGB backbone 指定层的 A2C2f 替换为跨模态版本（Exp-4a）
+        # IR backbone 不受影响，保留标准自注意力
+        self._cma_stages = set(self.yaml.get("cma_stages", []))
+        self._cma_layer_to_stage = {}
+        for stage_name in self._cma_stages:
+            if stage_name not in self.FUSION_LAYER_INDICES:
+                raise ValueError(f"cma_stages 中的 '{stage_name}' 不在 FUSION_LAYER_INDICES")
+            layer_idx = self.FUSION_LAYER_INDICES[stage_name]
+            old_layer = self.backbone_rgb[layer_idx]
+            c1 = old_layer.cv1.conv.in_channels
+            c2 = old_layer.cv2.conv.out_channels
+            n = len(old_layer.m)
+            area = old_layer.m[0][0].attn.area
+            new_layer = CrossModalA2C2f(c1, c2, n=n, area=area)
+            new_layer.i = old_layer.i
+            new_layer.f = old_layer.f
+            new_layer.type = f"{CrossModalA2C2f.__module__}.{CrossModalA2C2f.__name__}"
+            self.backbone_rgb[layer_idx] = new_layer
+            self._cma_layer_to_stage[layer_idx] = stage_name
 
         # 共享 neck + head
         self.head = nn.Sequential(*list(full_model.children())[backbone_end:])
@@ -484,14 +505,23 @@ class DualStreamDetectionModel(DetectionModel):
             return layer.conv.out_channels
         raise ValueError(f"Cannot determine output channels for {type(layer)}")
 
-    def _forward_backbone(self, backbone, x):
-        """运行单个 backbone 分支，收集各融合点输出。"""
+    def _forward_backbone(self, backbone, x, cross_feats=None):
+        """运行单个 backbone 分支，收集各融合点输出。
+
+        Args:
+            cross_feats: 可选，来自另一模态的特征字典 {stage_name: tensor}。
+                         当层为 CrossModalA2C2f 时，以此作为 KV 输入。
+        """
         feats = {}
         y = []
         for m in backbone:
             if m.f != -1:
                 x = y[m.f] if isinstance(m.f, int) else [x if j == -1 else y[j] for j in m.f]
-            x = m(x)
+            if isinstance(m, CrossModalA2C2f) and cross_feats is not None:
+                stage = self._cma_layer_to_stage[m.i]
+                x = m(x, cross_feats[stage])
+            else:
+                x = m(x)
             y.append(x if m.i in self.save else None)
             for stage_name, layer_idx in self.FUSION_LAYER_INDICES.items():
                 if m.i == layer_idx:
@@ -504,9 +534,10 @@ class DualStreamDetectionModel(DetectionModel):
         x_ir  = x[:, :3, ...]   # 0:3 = IR_RGB（经 [::-1] 通道反转后）
         x_rgb = x[:, 3:, ...]   # 3:6 = VIS_RGB
 
-        # 独立运行两个 backbone
-        feats_rgb = self._forward_backbone(self.backbone_rgb, x_rgb)
+        # IR backbone 先跑完（标准自注意力，无跨模态依赖）
         feats_ir  = self._forward_backbone(self.backbone_ir,  x_ir)
+        # RGB backbone 后跑，CrossModalA2C2f 层自动使用 IR 特征作为 KV
+        feats_rgb = self._forward_backbone(self.backbone_rgb, x_rgb, cross_feats=feats_ir)
 
         # 跨模态门控（Exp-1 无 CMG，此循环为空）
         for stage_name in self._cmg_stages:
