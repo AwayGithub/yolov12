@@ -1378,43 +1378,150 @@ class A2C2f(nn.Module):
 
 
 class CrossModalGating(nn.Module):
-    """跨模态 CBAM 注意力：用 guide 模态生成通道+空间注意力，调制 target 模态特征。
+    """跨模态 SE 门控：用 guide 模态的全局通道统计量生成门控信号，调制 target 模态特征。
 
-    参照 CBAM (Woo et al., 2018) 设计：
-    - 通道注意力：GAP+GMP → 共享 MLP → Sigmoid
-    - 空间注意力：channel-wise AvgPool+MaxPool → 7×7 Conv → Sigmoid
-    - 顺序：先通道后空间（CBAM 论文验证的最优排列）
-    - 残差门控保证信息不丢失
-    用于双分支融合时在 P4/P5 层级做双向跨模态交互。
+    SE (Squeeze-and-Excitation) 式设计：
+    - GAP 压缩空间维度 → Linear 生成通道权重 → Sigmoid 门控
+    - 残差连接保证信息不丢失：output = target * gate + target
+    用于双分支融合时在 P4/P5 层级做双向跨模态交互（Exp-2 验证）。
     """
 
-    def __init__(self, channels, reduction=4, spatial_kernel=7):
+    def __init__(self, channels):
         super().__init__()
-        # Channel attention
-        self.avg_pool = nn.AdaptiveAvgPool2d(1)
-        self.max_pool = nn.AdaptiveMaxPool2d(1)
-        mid = max(channels // reduction, 1)
-        self.mlp = nn.Sequential(
-            nn.Linear(channels, mid, bias=False),
-            nn.ReLU(inplace=True),
-            nn.Linear(mid, channels, bias=False),
-        )
-        # Spatial attention
-        self.spatial_conv = nn.Conv2d(2, 1, spatial_kernel,
-                                      padding=spatial_kernel // 2, bias=False)
+        self.pool = nn.AdaptiveAvgPool2d(1)
+        self.fc = nn.Linear(channels, channels)
 
     def forward(self, target, guide):
         """target: 被调制的特征, guide: 提供注意力信号的特征。"""
-        # Channel attention from guide
-        avg_out = self.mlp(self.avg_pool(guide).flatten(1))
-        max_out = self.mlp(self.max_pool(guide).flatten(1))
-        ch_w = torch.sigmoid(avg_out + max_out).unsqueeze(-1).unsqueeze(-1)  # (B, C, 1, 1)
-        target_ca = target * ch_w
+        gate = torch.sigmoid(self.fc(self.pool(guide).flatten(1)))  # (B, C)
+        gate = gate.unsqueeze(-1).unsqueeze(-1)  # (B, C, 1, 1)
+        return target * gate + target  # 残差门控
 
-        # Spatial attention from guide
-        avg_sp = torch.mean(guide, dim=1, keepdim=True)   # (B, 1, H, W)
-        max_sp = torch.max(guide, dim=1, keepdim=True)[0]  # (B, 1, H, W)
-        sp_w = torch.sigmoid(self.spatial_conv(torch.cat([avg_sp, max_sp], dim=1)))  # (B, 1, H, W)
-        target_sa = target_ca * sp_w
 
-        return target_sa + target  # 残差连接
+class CrossModalAAttn(nn.Module):
+    """Area-Attention cross-modal variant: Q from self modality, K/V from other modality.
+
+    Preserves original AAttn area-partition mechanism for computational efficiency.
+    Position encoding (pe) operates on V from the other modality.
+    """
+
+    def __init__(self, dim, num_heads, area=1):
+        """Initializes cross-modal area-attention with separate Q and KV projections."""
+        super().__init__()
+        self.area = area
+        self.num_heads = num_heads
+        self.head_dim = head_dim = dim // num_heads
+        all_head_dim = head_dim * self.num_heads
+
+        self.q = Conv(dim, all_head_dim, 1, act=False)
+        self.kv = Conv(dim, all_head_dim * 2, 1, act=False)
+        self.proj = Conv(all_head_dim, dim, 1, act=False)
+        self.pe = Conv(all_head_dim, dim, 5, 1, 2, g=dim, act=False)
+
+    def forward(self, x_self, x_other):
+        """Q from x_self, K/V from x_other, with area-partitioned attention."""
+        B, C, H, W = x_self.shape
+        N = H * W
+
+        q = self.q(x_self).flatten(2).transpose(1, 2)
+        kv = self.kv(x_other)
+        v_spatial = kv[:, C:, :, :]
+        pp = self.pe(v_spatial)
+        kv = kv.flatten(2).transpose(1, 2)
+
+        if self.area > 1:
+            q = q.reshape(B * self.area, N // self.area, C)
+            kv = kv.reshape(B * self.area, N // self.area, C * 2)
+            B, N, _ = q.shape
+
+        k, v = kv.split([C, C], dim=2)
+
+        q = q.transpose(1, 2).view(B, self.num_heads, self.head_dim, N)
+        k = k.transpose(1, 2).view(B, self.num_heads, self.head_dim, N)
+        v = v.transpose(1, 2).view(B, self.num_heads, self.head_dim, N)
+
+        attn = (q.transpose(-2, -1) @ k) * (self.head_dim ** -0.5)
+        max_attn = attn.max(dim=-1, keepdim=True).values
+        exp_attn = torch.exp(attn - max_attn)
+        attn = exp_attn / exp_attn.sum(dim=-1, keepdim=True)
+        x = (v @ attn.transpose(-2, -1)).permute(0, 3, 1, 2)
+
+        if self.area > 1:
+            x = x.reshape(B // self.area, N * self.area, C)
+            B, N, _ = x.shape
+        x = x.reshape(B, H, W, C).permute(0, 3, 1, 2)
+
+        return self.proj(x + pp)
+
+
+class CrossModalABlock(nn.Module):
+    """ABlock cross-modal variant: attention queries across modalities."""
+
+    def __init__(self, dim, num_heads, mlp_ratio=1.2, area=1):
+        """Initializes cross-modal ABlock with CrossModalAAttn and MLP."""
+        super().__init__()
+        self.attn = CrossModalAAttn(dim, num_heads=num_heads, area=area)
+        mlp_hidden_dim = int(dim * mlp_ratio)
+        self.mlp = nn.Sequential(Conv(dim, mlp_hidden_dim, 1), Conv(mlp_hidden_dim, dim, 1, act=False))
+        self.apply(self._init_weights)
+
+    def _init_weights(self, m):
+        """Initialize weights using a truncated normal distribution."""
+        if isinstance(m, nn.Conv2d):
+            nn.init.trunc_normal_(m.weight, std=0.02)
+            if m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+
+    def forward(self, x_self, x_other):
+        """Forward pass: cross-modal attention + MLP with residual connections."""
+        x_self = x_self + self.attn(x_self, x_other)
+        x_self = x_self + self.mlp(x_self)
+        return x_self
+
+
+class CrossModalA2C2f(nn.Module):
+    """A2C2f cross-modal variant (R-ELAN + Cross-Modal Attention).
+
+    Front n//2 groups use ABlock for intra-modal self-attention,
+    back n - n//2 groups use CrossModalABlock for cross-modal attention (Q=self, KV=other).
+    nano: n=2 -> 1 self-attn group (2 ABlocks) + 1 cross-modal group (1 CrossModalABlock).
+    forward(x_self, x_other) returns enhanced x_self features.
+    """
+
+    def __init__(self, c1, c2, n=2, area=4, mlp_ratio=2.0, e=0.5):
+        """Initialize CrossModalA2C2f with self-attention and cross-modal attention groups."""
+        super().__init__()
+        c_ = int(c2 * e)
+        assert c_ % 32 == 0, "Hidden dim must be a multiple of 32."
+        num_heads = c_ // 32
+
+        self.cv1 = Conv(c1, c_, 1, 1)
+        self.cv1_other = Conv(c1, c_, 1, 1)
+        self.cv2 = Conv((1 + n) * c_, c2, 1)
+
+        n_self = n // 2
+        n_cross = n - n_self
+
+        # Each self group: 2 ABlocks (matching original A2C2f structure)
+        self.m_self = nn.ModuleList(
+            nn.Sequential(*(ABlock(c_, num_heads, mlp_ratio, area) for _ in range(2)))
+            for _ in range(n_self)
+        )
+        # Each cross group: 1 CrossModalABlock
+        self.m_cross = nn.ModuleList(
+            CrossModalABlock(c_, num_heads, mlp_ratio, area)
+            for _ in range(n_cross)
+        )
+
+    def forward(self, x_self, x_other):
+        """Forward pass with interleaved self-attention and cross-modal attention groups."""
+        feat = self.cv1(x_self)
+        feat_other = self.cv1_other(x_other)
+
+        y = [feat]
+        for m in self.m_self:
+            y.append(m(y[-1]))
+        for m in self.m_cross:
+            y.append(m(y[-1], feat_other))
+
+        return self.cv2(torch.cat(y, 1))

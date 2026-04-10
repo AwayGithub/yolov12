@@ -59,6 +59,7 @@ from .block import (
     TorchVision,
     A2C2f,
     CrossModalGating,
+    CrossModalA2C2f,
 )
 from .conv import (
     CBAM,
