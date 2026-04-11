@@ -33,9 +33,9 @@ def parse_args():
     parser.add_argument(
         "--grad_debug_steps",
         type=int,
-        default=100,
+        default=10,
         metavar="N",
-        help="每个 epoch 打印前 N 个 step 的梯度范数（默认 100）",
+        help="每个 epoch 打印前 N 个 step 的梯度范数（默认 10）",
     )
     return parser.parse_args()
 
@@ -91,6 +91,23 @@ def _remove_grad_hooks(trainer):
     del trainer._grad_debug_state
 
 
+def _print_cross_scale(trainer):
+    """on_train_batch_end: 每 100 步打印一次所有 cross_scale 参数的当前值。"""
+    if not hasattr(trainer, "_cross_scale_step"):
+        trainer._cross_scale_step = 0
+    trainer._cross_scale_step += 1
+    if trainer._cross_scale_step % 100 != 0:
+        return
+    values = {
+        name: f"{param.item():.5f}"
+        for name, param in trainer.model.named_parameters()
+        if "cross_scale" in name
+    }
+    if values:
+        vals_str = "  ".join(f"{k}={v}" for k, v in values.items())
+        print(f"[cross_scale ep={trainer.epoch+1} step={trainer._cross_scale_step}] {vals_str}")
+
+
 if __name__ == "__main__":
     args = parse_args()
     data_cfg = yaml_load("ultralytics/cfg/datasets/RGBT-3M.yaml")
@@ -111,6 +128,7 @@ if __name__ == "__main__":
         model.add_callback("on_train_start", _inject_config)
         model.add_callback("on_train_epoch_start", _register_grad_hooks)
         model.add_callback("on_train_batch_end", _step_or_remove_grad_hooks)
+        model.add_callback("on_train_batch_end", _print_cross_scale)
         model.add_callback("on_train_epoch_end", _remove_grad_hooks)
         print(f"[grad-hooks] Debug mode: first {args.grad_debug_steps} steps per epoch.")
 
