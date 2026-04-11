@@ -31,18 +31,11 @@ def parse_args():
         help="打印前 N 个 step 的梯度范数，用于检查跨模态路径的梯度流",
     )
     parser.add_argument(
-        "--grad_debug_epoch",
-        type=int,
-        default=5,
-        metavar="EPOCH",
-        help="在第几个 epoch 开始挂梯度钩子（默认 5，1-indexed）",
-    )
-    parser.add_argument(
         "--grad_debug_steps",
         type=int,
-        default=1000,
+        default=100,
         metavar="N",
-        help="梯度调试打印的 step 数（默认 1000）",
+        help="每个 epoch 打印前 N 个 step 的梯度范数（默认 100）",
     )
     return parser.parse_args()
 
@@ -51,14 +44,8 @@ def parse_args():
 # 梯度调试 callbacks（仅 --grad_debug 时启用）
 # ---------------------------------------------------------------------------
 
-def _maybe_register_grad_hooks(trainer):
-    """on_train_epoch_start: 在目标 epoch 开始时注册梯度钩子（仅注册一次）。"""
-    # trainer.epoch 从 0 开始，转换为 1-indexed 与用户参数对齐
-    if trainer.epoch != trainer._grad_debug_epoch - 1:
-        return
-    if hasattr(trainer, "_grad_debug_state"):
-        return  # 已注册，跳过
-
+def _register_grad_hooks(trainer):
+    """on_train_epoch_start: 每个 epoch 开始时注册梯度钩子。"""
     keywords = ["backbone_rgb", "backbone_ir", "cross_scale", "cmg_modules"]
     n_steps = trainer._grad_debug_steps
     step = [0]
@@ -74,17 +61,17 @@ def _maybe_register_grad_hooks(trainer):
             def hook(grad):
                 if step[0] < n_steps:
                     norm = grad.norm().item() if grad is not None else float("nan")
-                    print(f"[grad step={step[0]:4d}] {n:75s} {norm:.3e}")
+                    print(f"[grad ep={trainer.epoch+1} step={step[0]:3d}] {n:75s} {norm:.3e}")
             return hook
 
         hooks.append(param.register_hook(make_hook(name)))
 
-    print(f"[grad-hooks] Epoch {trainer.epoch + 1}: {len(hooks)} hooks registered on backbone_rgb / backbone_ir / cross_scale.")
+    print(f"[grad-hooks] Epoch {trainer.epoch + 1}: {len(hooks)} hooks registered.")
     trainer._grad_debug_state = {"hooks": hooks, "step": step}
 
 
-def _remove_grad_hooks(trainer):
-    """on_train_batch_end: 达到目标 step 数后自动移除钩子。"""
+def _step_or_remove_grad_hooks(trainer):
+    """on_train_batch_end: 计步，达到 N 步后移除钩子（epoch 结束前提前停止打印）。"""
     if not hasattr(trainer, "_grad_debug_state"):
         return
     state = trainer._grad_debug_state
@@ -93,7 +80,15 @@ def _remove_grad_hooks(trainer):
         for h in state["hooks"]:
             h.remove()
         del trainer._grad_debug_state
-        print(f"[grad-hooks] All hooks removed after {trainer._grad_debug_steps} steps.")
+
+
+def _remove_grad_hooks(trainer):
+    """on_train_epoch_end: epoch 结束时清理残余钩子（steps < N 的 epoch）。"""
+    if not hasattr(trainer, "_grad_debug_state"):
+        return
+    for h in trainer._grad_debug_state["hooks"]:
+        h.remove()
+    del trainer._grad_debug_state
 
 
 if __name__ == "__main__":
@@ -111,13 +106,13 @@ if __name__ == "__main__":
     if args.grad_debug:
         # 将参数附到 trainer 上，供 callback 读取
         def _inject_config(trainer):
-            trainer._grad_debug_epoch = args.grad_debug_epoch
             trainer._grad_debug_steps = args.grad_debug_steps
 
         model.add_callback("on_train_start", _inject_config)
-        model.add_callback("on_train_epoch_start", _maybe_register_grad_hooks)
-        model.add_callback("on_train_batch_end", _remove_grad_hooks)
-        print(f"[grad-hooks] Debug mode: epoch {args.grad_debug_epoch}, up to {args.grad_debug_steps} steps.")
+        model.add_callback("on_train_epoch_start", _register_grad_hooks)
+        model.add_callback("on_train_batch_end", _step_or_remove_grad_hooks)
+        model.add_callback("on_train_epoch_end", _remove_grad_hooks)
+        print(f"[grad-hooks] Debug mode: first {args.grad_debug_steps} steps per epoch.")
 
     results = model.train(
         data=data_cfg,
