@@ -59,7 +59,7 @@ def _maybe_register_grad_hooks(trainer):
     if hasattr(trainer, "_grad_debug_state"):
         return  # 已注册，跳过
 
-    keywords = ["backbone_rgb", "backbone_ir", "cross_scale"]
+    keywords = ["backbone_rgb", "backbone_ir", "cross_scale", "cmg_modules"]
     n_steps = trainer._grad_debug_steps
     step = [0]
     hooks = []
