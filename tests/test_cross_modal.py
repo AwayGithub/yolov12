@@ -1,4 +1,4 @@
-"""Smoke tests for cross-modal attention modules (Exp-4a)."""
+"""Smoke tests for cross-modal attention modules (Exp-4b: bidirectional residual CMA)."""
 
 import torch
 
@@ -33,10 +33,11 @@ def test_cross_modal_a2c2f_shape():
 
 
 def test_cross_modal_a2c2f_group_split():
-    """n=2 -> 1 self-attn group + 1 cross-modal group."""
+    """n=2 -> all 2 groups in m_self (full self-attn capacity) + 1 cross-modal residual."""
     m = CrossModalA2C2f(c1=128, c2=128, n=2, area=4)
-    assert len(m.m_self) == 1
-    assert len(m.m_cross) == 1
+    assert len(m.m_self) == 2   # ALL n groups keep self-attention
+    assert len(m.m_cross) == 1  # last 1 group also has cross-modal residual
+    assert hasattr(m, "cross_scale"), "cross_scale parameter must exist"
 
 
 def test_cross_modal_a2c2f_p5_config():
@@ -72,3 +73,17 @@ def test_dual_stream_cma_and_cmg_combined():
     with torch.no_grad():
         out = model(x)
     assert out is not None
+
+
+def test_dual_stream_cma_bidirectional():
+    """Both RGB and IR backbones have CrossModalA2C2f (bidirectional CMA)."""
+    from ultralytics.nn.tasks import DualStreamDetectionModel
+
+    model = DualStreamDetectionModel("yolov12-dual.yaml", nc=3, verbose=False)
+    for layer_idx in model._cma_layer_to_stage:
+        assert isinstance(model.backbone_rgb[layer_idx], CrossModalA2C2f), \
+            f"backbone_rgb[{layer_idx}] should be CrossModalA2C2f"
+        assert isinstance(model.backbone_ir[layer_idx], CrossModalA2C2f), \
+            f"backbone_ir[{layer_idx}] should be CrossModalA2C2f (bidirectional)"
+        # Weights must be independent (different objects)
+        assert model.backbone_rgb[layer_idx] is not model.backbone_ir[layer_idx]

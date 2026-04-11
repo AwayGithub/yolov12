@@ -1436,15 +1436,11 @@ class CrossModalAAttn(nn.Module):
 
         k, v = kv.split([C, C], dim=2)
 
-        q = q.transpose(1, 2).view(B, self.num_heads, self.head_dim, N)
-        k = k.transpose(1, 2).view(B, self.num_heads, self.head_dim, N)
-        v = v.transpose(1, 2).view(B, self.num_heads, self.head_dim, N)
-
-        attn = (q.transpose(-2, -1) @ k) * (self.head_dim ** -0.5)
-        max_attn = attn.max(dim=-1, keepdim=True).values
-        exp_attn = torch.exp(attn - max_attn)
-        attn = exp_attn / exp_attn.sum(dim=-1, keepdim=True)
-        x = (v @ attn.transpose(-2, -1)).permute(0, 3, 1, 2)
+        q = q.view(B, N, self.num_heads, self.head_dim).transpose(1, 2)  # (B, nh, N, d)
+        k = k.view(B, N, self.num_heads, self.head_dim).transpose(1, 2)
+        v = v.view(B, N, self.num_heads, self.head_dim).transpose(1, 2)
+        x = sdpa(q, k, v)                                                 # (B, nh, N, d) — AMP 安全，fused kernel
+        x = x.transpose(1, 2).reshape(B, N, C)                           # (B, N, C)
 
         if self.area > 1:
             x = x.reshape(B // self.area, N * self.area, C)
@@ -1499,29 +1495,32 @@ class CrossModalA2C2f(nn.Module):
         self.cv1_other = Conv(c1, c_, 1, 1)
         self.cv2 = Conv((1 + n) * c_, c2, 1)
 
-        n_self = n // 2
-        n_cross = n - n_self
+        n_cross = n - n // 2
 
-        # Each self group: 2 ABlocks (matching original A2C2f structure)
+        # All n groups keep full self-attention capacity
         self.m_self = nn.ModuleList(
             nn.Sequential(*(ABlock(c_, num_heads, mlp_ratio, area) for _ in range(2)))
-            for _ in range(n_self)
+            for _ in range(n)
         )
-        # Each cross group: 1 CrossModalABlock
+        # Last n_cross groups also get a cross-modal residual branch
         self.m_cross = nn.ModuleList(
             CrossModalABlock(c_, num_heads, mlp_ratio, area)
             for _ in range(n_cross)
         )
+        # Learnable scale for the cross-modal residual; starts near 0 so training
+        # begins close to the pure self-attention baseline and grows as needed.
+        self.cross_scale = nn.Parameter(torch.ones(1) * 0.01)
 
     def forward(self, x_self, x_other):
-        """Forward pass with interleaved self-attention and cross-modal attention groups."""
+        """Self-attention for all groups; last n_cross groups add a cross-modal residual."""
         feat = self.cv1(x_self)
         feat_other = self.cv1_other(x_other)
 
+        n_self_only = len(self.m_self) - len(self.m_cross)
         y = [feat]
-        for m in self.m_self:
+        for m in self.m_self[:n_self_only]:
             y.append(m(y[-1]))
-        for m in self.m_cross:
-            y.append(m(y[-1], feat_other))
+        for m_s, m_c in zip(self.m_self[n_self_only:], self.m_cross):
+            y.append(m_s(y[-1]) + self.cross_scale * m_c(y[-1], feat_other))
 
         return self.cv2(torch.cat(y, 1))
