@@ -1,0 +1,526 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>Training Metrics Visualizer</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: 'Segoe UI', sans-serif; background: #0f1117; color: #e0e0e0; padding: 20px; }
+h1 { text-align: center; font-size: 1.4rem; color: #7eb8f7; margin-bottom: 20px; letter-spacing: 1px; }
+
+.load-panel {
+  display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 20px;
+  background: #1a1d27; border-radius: 10px; padding: 16px;
+}
+.file-slot { flex: 1; min-width: 260px; }
+.file-slot > label { display: block; font-size: 0.75rem; color: #8a9bb0; margin-bottom: 6px; }
+.file-slot input[type=file] { display: none; }
+.file-btn {
+  display: inline-block; padding: 7px 14px; border-radius: 6px; cursor: pointer;
+  font-size: 0.83rem; border: 1px solid #3a4560; background: #252a3a; color: #c0d0e8;
+}
+.file-btn:hover { background: #2e3550; }
+.file-name { margin-top: 5px; font-size: 0.76rem; color: #6a7a90; }
+.exp-label input {
+  margin-top: 5px; background: #252a3a; border: 1px solid #3a4560; border-radius: 4px;
+  color: #c0d0e8; padding: 4px 8px; font-size: 0.82rem; width: 100%;
+}
+.color-dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 5px; vertical-align: middle; }
+
+/* tabs */
+.tab-bar { display: flex; gap: 8px; margin-bottom: 14px; flex-wrap: wrap; }
+.tab {
+  padding: 6px 16px; border-radius: 20px; font-size: 0.8rem; cursor: pointer;
+  border: 1px solid #3a4560; background: #1a1d27; color: #8a9bb0; transition: all 0.15s;
+}
+.tab.active { background: #2a4070; border-color: #5a80b0; color: #c8dcf0; }
+
+/* global epoch range */
+.slider-wrap {
+  display: flex; align-items: center; gap: 10px; margin-bottom: 16px;
+  font-size: 0.8rem; color: #6a8090; background: #1a1d27; padding: 10px 14px; border-radius: 8px;
+}
+.slider-wrap input[type=range] { flex: 1; accent-color: #4a80c0; }
+
+/* section title */
+.section-title { font-size: 0.76rem; color: #5a7090; text-transform: uppercase; letter-spacing: 1px; margin: 18px 0 10px; }
+
+/* metric cards */
+.metrics-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; margin-bottom: 18px; }
+.metric-card {
+  background: #1a1d27; border-radius: 8px; padding: 11px 13px;
+  border: 1px solid #252a3a;
+}
+.metric-card .label { font-size: 0.7rem; color: #6a8090; margin-bottom: 4px; }
+.metric-card .val  { font-size: 1.05rem; font-weight: 600; }
+.metric-card .sub  { font-size: 0.78rem; color: #8090a0; margin-top: 2px; }
+.metric-card .delta { font-size: 0.74rem; margin-top: 4px; }
+.pos { color: #4caf90; } .neg { color: #e05060; } .neu { color: #8090a0; }
+
+/* charts */
+.charts-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(420px, 1fr)); gap: 16px; }
+.chart-card { background: #1a1d27; border-radius: 10px; padding: 14px; border: 1px solid #252a3a; }
+.chart-card h3 { font-size: 0.8rem; color: #8aa0c0; margin-bottom: 8px; }
+.chart-card canvas { max-height: 210px; }
+
+/* compare epoch slider */
+.cmp-slider-wrap {
+  display: flex; align-items: center; gap: 12px; margin-bottom: 18px;
+  font-size: 0.82rem; color: #8a9bb0; background: #1a1d27;
+  padding: 12px 16px; border-radius: 8px; border: 1px solid #2a3a50;
+}
+.cmp-slider-wrap input[type=range] { flex: 1; accent-color: #f0a04a; }
+.cmp-epoch-val { font-size: 1rem; font-weight: 700; color: #f0a04a; min-width: 40px; }
+
+/* compare table */
+.cmp-table { width: 100%; border-collapse: collapse; font-size: 0.82rem; margin-bottom: 20px; }
+.cmp-table th {
+  background: #1a1d27; color: #7090b0; font-weight: 500; padding: 8px 12px;
+  text-align: left; border-bottom: 1px solid #2a3a50;
+}
+.cmp-table td { padding: 7px 12px; border-bottom: 1px solid #1e2535; }
+.cmp-table tr:hover td { background: #1e2535; }
+.winner-a { color: #5b9cf6; font-weight: 600; }
+.winner-b { color: #f0a04a; font-weight: 600; }
+.cmp-badge { font-size: 0.7rem; padding: 2px 6px; border-radius: 4px; margin-left: 4px; }
+.badge-a { background: rgba(91,156,246,0.2); color: #5b9cf6; }
+.badge-b { background: rgba(240,160,74,0.2); color: #f0a04a; }
+.badge-tie { background: rgba(120,130,150,0.2); color: #8090a0; }
+
+#empty-msg { text-align: center; color: #4a5a70; padding: 60px 0; font-size: 0.9rem; }
+</style>
+</head>
+<body>
+<h1>Training Metrics Visualizer</h1>
+
+<div class="load-panel">
+  <div class="file-slot">
+    <label>实验 A <span class="color-dot" style="background:#5b9cf6"></span></label>
+    <label class="file-btn" for="fileA">选择 CSV 文件</label>
+    <input type="file" id="fileA" accept=".csv">
+    <div class="exp-label"><input type="text" id="labelA" placeholder="实验名称（如 Exp-2）"></div>
+    <div class="file-name" id="fnameA">未选择</div>
+  </div>
+  <div class="file-slot">
+    <label>实验 B <span class="color-dot" style="background:#f0a04a"></span></label>
+    <label class="file-btn" for="fileB">选择 CSV 文件</label>
+    <input type="file" id="fileB" accept=".csv">
+    <div class="exp-label"><input type="text" id="labelB" placeholder="实验名称（如 Exp-4a）"></div>
+    <div class="file-name" id="fnameB">未选择</div>
+  </div>
+</div>
+
+<div id="empty-msg">请加载至少一个 CSV 文件</div>
+
+<div id="main" style="display:none">
+  <div class="tab-bar">
+    <div class="tab active" data-tab="overview">总览</div>
+    <div class="tab" data-tab="train">训练 Loss</div>
+    <div class="tab" data-tab="val">验证 Loss</div>
+    <div class="tab" data-tab="metrics">检测指标</div>
+    <div class="tab" data-tab="lr">学习率</div>
+    <div class="tab" data-tab="compare">对比分析</div>
+  </div>
+
+  <!-- 全局 epoch 范围（对比分析 tab 不显示） -->
+  <div class="slider-wrap" id="global-slider">
+    <span>Epoch 范围：</span>
+    <input type="range" id="epochStart" min="1" value="1">
+    <span id="epochStartLabel">1</span>
+    <span>—</span>
+    <input type="range" id="epochEnd" min="1" value="300">
+    <span id="epochEndLabel">300</span>
+  </div>
+
+  <!-- tabs (visibility via opacity+pointer-events to keep canvas dimensions) -->
+  <div id="tab-overview"><div class="section-title">最佳指标快照</div><div class="metrics-grid" id="snapshot-grid"></div><div class="charts-grid" id="overview-charts"></div></div>
+  <div id="tab-train"   style="display:none"><div class="charts-grid" id="train-charts"></div></div>
+  <div id="tab-val"     style="display:none"><div class="charts-grid" id="val-charts"></div></div>
+  <div id="tab-metrics" style="display:none"><div class="charts-grid" id="metrics-charts"></div></div>
+  <div id="tab-lr"      style="display:none"><div class="charts-grid" id="lr-charts"></div></div>
+
+  <!-- Compare tab -->
+  <div id="tab-compare" style="display:none">
+    <div id="cmp-no-data" style="color:#4a5a70;padding:30px 0;display:none">需要同时加载实验 A 和 B 才能对比</div>
+
+    <!-- epoch 滑块 -->
+    <div class="cmp-slider-wrap" id="cmp-slider-wrap">
+      <span>查看 Epoch：</span>
+      <input type="range" id="cmpEpoch" min="1" value="1">
+      <span class="cmp-epoch-val" id="cmpEpochLabel">1</span>
+      <span style="color:#5a7090;font-size:0.76rem">（拖动查看该 epoch 下的指标对比）</span>
+    </div>
+
+    <!-- 逐 epoch 数值对比表格 -->
+    <div class="section-title">当前 Epoch 各指标数值对比</div>
+    <table class="cmp-table" id="cmp-table">
+      <thead>
+        <tr>
+          <th>指标</th>
+          <th id="cmp-th-a"><span class="color-dot" style="background:#5b9cf6"></span>实验 A</th>
+          <th id="cmp-th-b"><span class="color-dot" style="background:#f0a04a"></span>实验 B</th>
+          <th>差值 (B−A)</th>
+          <th>优劣</th>
+        </tr>
+      </thead>
+      <tbody id="cmp-tbody"></tbody>
+    </table>
+
+    <!-- 最佳值对比 -->
+    <div class="section-title">全程最佳值对比</div>
+    <div class="metrics-grid" id="best-compare-grid"></div>
+
+    <!-- 曲线叠加图 -->
+    <div class="section-title">曲线叠加对比</div>
+    <div class="charts-grid" id="compare-charts"></div>
+  </div>
+</div>
+
+<script>
+const COLORS = {
+  A: { line: '#5b9cf6', fill: 'rgba(91,156,246,0.10)' },
+  B: { line: '#f0a04a', fill: 'rgba(240,160,74,0.10)' },
+};
+
+const ALL_METRICS = [
+  { key: 'metrics/mAP50(B)',     label: 'mAP50',         lower: false, group: 'metrics' },
+  { key: 'metrics/mAP50-95(B)', label: 'mAP50-95',      lower: false, group: 'metrics' },
+  { key: 'metrics/precision(B)', label: 'Precision',     lower: false, group: 'metrics' },
+  { key: 'metrics/recall(B)',    label: 'Recall',        lower: false, group: 'metrics' },
+  { key: 'train/box_loss',       label: 'Train Box Loss',lower: true,  group: 'train'   },
+  { key: 'train/cls_loss',       label: 'Train Cls Loss',lower: true,  group: 'train'   },
+  { key: 'train/dfl_loss',       label: 'Train DFL Loss',lower: true,  group: 'train'   },
+  { key: 'val/box_loss',         label: 'Val Box Loss',  lower: true,  group: 'val'     },
+  { key: 'val/cls_loss',         label: 'Val Cls Loss',  lower: true,  group: 'val'     },
+  { key: 'val/dfl_loss',         label: 'Val DFL Loss',  lower: true,  group: 'val'     },
+  { key: 'lr/pg0',               label: 'LR pg0',        lower: null,  group: 'lr'      },
+  { key: 'lr/pg1',               label: 'LR pg1',        lower: null,  group: 'lr'      },
+  { key: 'lr/pg2',               label: 'LR pg2',        lower: null,  group: 'lr'      },
+];
+const byGroup = g => ALL_METRICS.filter(m => m.group === g);
+
+let data = { A: null, B: null };
+let charts = {};
+let epochRange = [1, 999];
+let cmpEpoch = 1;
+let activeTab = 'overview';
+
+// ── CSV ──
+function parseCSV(text) {
+  const lines = text.trim().split('\n');
+  const headers = lines[0].split(',').map(h => h.trim());
+  return lines.slice(1).map(line => {
+    const vals = line.split(',');
+    const row = {};
+    headers.forEach((h, i) => { row[h] = parseFloat(vals[i]); });
+    return row;
+  }).filter(r => !isNaN(r.epoch));
+}
+
+function getBestRow(rows, key, lower) {
+  const valid = rows.filter(r => !isNaN(r[key]));
+  if (!valid.length) return null;
+  return valid.reduce((b, r) => lower ? (r[key] < b[key] ? r : b) : (r[key] > b[key] ? r : b));
+}
+
+function getRowAt(rows, epoch) {
+  // find closest epoch
+  if (!rows) return null;
+  let best = null;
+  rows.forEach(r => {
+    if (!best || Math.abs(r.epoch - epoch) < Math.abs(best.epoch - epoch)) best = r;
+  });
+  return best;
+}
+
+function getLabel(slot) {
+  return document.getElementById('label' + slot).value || ('Exp ' + slot);
+}
+
+// ── File loading ──
+['A','B'].forEach(slot => {
+  document.getElementById('file'+slot).addEventListener('change', e => {
+    const file = e.target.files[0]; if (!file) return;
+    document.getElementById('fname'+slot).textContent = file.name;
+    if (!document.getElementById('label'+slot).value)
+      document.getElementById('label'+slot).value = file.name.replace(/\.csv$/i,'');
+    const reader = new FileReader();
+    reader.onload = ev => { data[slot] = parseCSV(ev.target.result); onDataLoaded(); };
+    reader.readAsText(file);
+  });
+  document.getElementById('label'+slot).addEventListener('input', rebuildAll);
+});
+
+function maxEpoch() {
+  return Math.max(
+    data.A ? data.A[data.A.length-1].epoch : 1,
+    data.B ? data.B[data.B.length-1].epoch : 1,
+  );
+}
+
+function onDataLoaded() {
+  document.getElementById('empty-msg').style.display = 'none';
+  document.getElementById('main').style.display = 'block';
+  const mx = maxEpoch();
+  ['epochStart','epochEnd'].forEach(id => { document.getElementById(id).max = mx; });
+  document.getElementById('epochEnd').value = mx;
+  document.getElementById('epochEndLabel').textContent = mx;
+  epochRange = [1, mx];
+
+  const cmpEl = document.getElementById('cmpEpoch');
+  cmpEl.max = mx;
+  cmpEl.value = Math.min(+cmpEl.value || mx, mx);
+  cmpEpoch = +cmpEl.value;
+  document.getElementById('cmpEpochLabel').textContent = cmpEpoch;
+
+  rebuildAll();
+}
+
+// ── Global epoch range ──
+document.getElementById('epochStart').addEventListener('input', () => {
+  let s = +document.getElementById('epochStart').value;
+  let e = +document.getElementById('epochEnd').value;
+  if (s > e) { s = e; document.getElementById('epochStart').value = s; }
+  document.getElementById('epochStartLabel').textContent = s;
+  epochRange = [s, e]; rebuildAll();
+});
+document.getElementById('epochEnd').addEventListener('input', () => {
+  let s = +document.getElementById('epochStart').value;
+  let e = +document.getElementById('epochEnd').value;
+  if (e < s) { e = s; document.getElementById('epochEnd').value = e; }
+  document.getElementById('epochEndLabel').textContent = e;
+  epochRange = [s, e]; rebuildAll();
+});
+
+// ── Compare epoch slider ──
+document.getElementById('cmpEpoch').addEventListener('input', () => {
+  cmpEpoch = +document.getElementById('cmpEpoch').value;
+  document.getElementById('cmpEpochLabel').textContent = cmpEpoch;
+  buildCompareTable();
+});
+
+function filterRows(rows) {
+  if (!rows) return null;
+  return rows.filter(r => r.epoch >= epochRange[0] && r.epoch <= epochRange[1]);
+}
+
+// ── Chart factory ──
+function makeChart(canvasId, datasets) {
+  const ctx = document.getElementById(canvasId);
+  if (!ctx) return;
+  if (charts[canvasId]) { charts[canvasId].destroy(); delete charts[canvasId]; }
+  charts[canvasId] = new Chart(ctx, {
+    type: 'line',
+    data: { datasets },
+    options: {
+      responsive: true, animation: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { labels: { color: '#8aa0c0', font: { size: 11 }, boxWidth: 12 } },
+        tooltip: { backgroundColor: '#1e2535', titleColor: '#c0d0e8', bodyColor: '#9ab0c0' },
+      },
+      scales: {
+        x: {
+          type: 'linear',
+          title: { display: true, text: 'Epoch', color: '#5a7090', font: { size: 10 } },
+          ticks: { color: '#5a7090', maxTicksLimit: 10 },
+          grid: { color: '#1e2535' },
+        },
+        y: { ticks: { color: '#5a7090' }, grid: { color: '#1e2535' } },
+      },
+    },
+  });
+}
+
+function buildDataset(rows, key, slot, label) {
+  return {
+    label,
+    data: rows.filter(r => !isNaN(r[key])).map(r => ({ x: r.epoch, y: r[key] })),
+    borderColor: COLORS[slot].line, backgroundColor: COLORS[slot].fill,
+    fill: true, borderWidth: 1.8, pointRadius: 0, tension: 0.3,
+  };
+}
+
+function addChartCard(containerId, id, title) {
+  const card = document.createElement('div');
+  card.className = 'chart-card';
+  card.innerHTML = `<h3>${title}</h3><canvas id="${id}"></canvas>`;
+  document.getElementById(containerId).appendChild(card);
+}
+
+function buildGroupCharts(containerId, metrics) {
+  document.getElementById(containerId).innerHTML = '';
+  metrics.forEach((m, i) => {
+    const id = containerId + '_' + i;
+    addChartCard(containerId, id, m.label);
+    const ds = [];
+    ['A','B'].forEach(slot => {
+      const rows = filterRows(data[slot]);
+      if (rows) ds.push(buildDataset(rows, m.key, slot, getLabel(slot)));
+    });
+    makeChart(id, ds);
+  });
+}
+
+// ── Snapshot ──
+function buildSnapshot() {
+  const grid = document.getElementById('snapshot-grid');
+  grid.innerHTML = '';
+  const keys = byGroup('metrics').concat(byGroup('train').slice(0,1), byGroup('val').slice(0,1));
+  keys.forEach(m => {
+    ['A','B'].forEach(slot => {
+      if (!data[slot]) return;
+      const best = getBestRow(filterRows(data[slot]), m.key, m.lower);
+      if (!best) return;
+      const otherSlot = slot==='A'?'B':'A';
+      let deltaHtml = '';
+      if (data[otherSlot]) {
+        const ob = getBestRow(filterRows(data[otherSlot]), m.key, m.lower);
+        if (ob) {
+          const d = best[m.key] - ob[m.key];
+          if (Math.abs(d) > 1e-6) {
+            const cls = m.lower ? (d<0?'pos':'neg') : (d>0?'pos':'neg');
+            deltaHtml = `<div class="delta ${cls}">${d>0?'+':''}${d.toFixed(4)} vs ${getLabel(otherSlot)}</div>`;
+          }
+        }
+      }
+      const card = document.createElement('div');
+      card.className = 'metric-card';
+      card.innerHTML = `
+        <div class="label"><span class="color-dot" style="background:${COLORS[slot].line}"></span>${m.label}</div>
+        <div class="val" style="color:${COLORS[slot].line}">${best[m.key].toFixed(4)}</div>
+        <div class="sub">${getLabel(slot)} · ep${best.epoch}</div>
+        ${deltaHtml}`;
+      grid.appendChild(card);
+    });
+  });
+}
+
+// ── Compare: epoch table ──
+function buildCompareTable() {
+  if (!data.A || !data.B) return;
+  document.getElementById('cmp-th-a').innerHTML = `<span class="color-dot" style="background:#5b9cf6"></span>${getLabel('A')}`;
+  document.getElementById('cmp-th-b').innerHTML = `<span class="color-dot" style="background:#f0a04a"></span>${getLabel('B')}`;
+
+  const rowA = getRowAt(data.A, cmpEpoch);
+  const rowB = getRowAt(data.B, cmpEpoch);
+  const tbody = document.getElementById('cmp-tbody');
+  tbody.innerHTML = '';
+
+  ALL_METRICS.filter(m => m.lower !== null).forEach(m => {
+    const vA = rowA ? rowA[m.key] : NaN;
+    const vB = rowB ? rowB[m.key] : NaN;
+    const hasA = !isNaN(vA), hasB = !isNaN(vB);
+    if (!hasA && !hasB) return;
+
+    const d = (hasA && hasB) ? vB - vA : NaN;
+    let winnerHtml = '<span class="cmp-badge badge-tie">—</span>';
+    let aClass = '', bClass = '';
+    if (!isNaN(d) && Math.abs(d) > 1e-6) {
+      const bWins = m.lower ? d < 0 : d > 0;
+      if (bWins) { bClass = 'winner-b'; winnerHtml = `<span class="cmp-badge badge-b">B 更优</span>`; }
+      else        { aClass = 'winner-a'; winnerHtml = `<span class="cmp-badge badge-a">A 更优</span>`; }
+    } else if (!isNaN(d)) {
+      winnerHtml = '<span class="cmp-badge badge-tie">持平</span>';
+    }
+
+    const dStr = !isNaN(d) ? `<span class="${m.lower?(d<0?'pos':'neg'):(d>0?'pos':'neg')}">${d>0?'+':''}${d.toFixed(5)}</span>` : '—';
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${m.label}</td>
+      <td class="${aClass}">${hasA ? vA.toFixed(5) : '—'}</td>
+      <td class="${bClass}">${hasB ? vB.toFixed(5) : '—'}</td>
+      <td>${dStr}</td>
+      <td>${winnerHtml}</td>`;
+    tbody.appendChild(tr);
+  });
+
+  // actual epoch note
+  const epA = rowA ? rowA.epoch : '?', epB = rowB ? rowB.epoch : '?';
+  if (epA !== cmpEpoch || epB !== cmpEpoch) {
+    const note = document.createElement('tr');
+    note.innerHTML = `<td colspan="5" style="color:#5a7090;font-size:0.73rem;padding:6px 12px">
+      实际最近 epoch：A=${epA}，B=${epB}（两个实验训练进度可能不同）</td>`;
+    tbody.appendChild(note);
+  }
+}
+
+// ── Compare: best cards ──
+function buildBestCompare() {
+  const grid = document.getElementById('best-compare-grid');
+  grid.innerHTML = '';
+  if (!data.A || !data.B) return;
+  ALL_METRICS.filter(m => m.lower !== null).forEach(m => {
+    const bA = getBestRow(data.A, m.key, m.lower);
+    const bB = getBestRow(data.B, m.key, m.lower);
+    if (!bA || !bB) return;
+    const d = bB[m.key] - bA[m.key];
+    const bWins = m.lower ? d < 0 : d > 0;
+    const cls = m.lower ? (d<0?'pos':'neg') : (d>0?'pos':'neg');
+    const card = document.createElement('div');
+    card.className = 'metric-card';
+    card.innerHTML = `
+      <div class="label">${m.label} <small style="color:#4a6070">(全程最佳)</small></div>
+      <div class="val" style="color:${COLORS.A.line}">${bA[m.key].toFixed(4)} <small style="color:#4a6080">ep${bA.epoch}</small></div>
+      <div class="val" style="color:${COLORS.B.line}">${bB[m.key].toFixed(4)} <small style="color:#4a6080">ep${bB.epoch}</small></div>
+      <div class="delta ${cls}">${d>0?'+':''}${d.toFixed(4)} ${bWins?'B 更优':'A 更优'}</div>`;
+    grid.appendChild(card);
+  });
+}
+
+// ── Compare: overlay charts ──
+function buildCompareCharts() {
+  document.getElementById('compare-charts').innerHTML = '';
+  if (!data.A || !data.B) return;
+  ALL_METRICS.filter(m => m.lower !== null).forEach((m, i) => {
+    const id = 'cmp_' + i;
+    addChartCard('compare-charts', id, m.label + ' — A vs B');
+    makeChart(id, [
+      buildDataset(data.A, m.key, 'A', getLabel('A')),
+      buildDataset(data.B, m.key, 'B', getLabel('B')),
+    ]);
+  });
+}
+
+function buildCompareAll() {
+  const hasAB = data.A && data.B;
+  document.getElementById('cmp-no-data').style.display     = hasAB ? 'none' : 'block';
+  document.getElementById('cmp-slider-wrap').style.display  = hasAB ? 'flex' : 'none';
+  document.getElementById('cmp-table').style.display        = hasAB ? ''     : 'none';
+  if (!hasAB) return;
+  buildCompareTable();
+  buildBestCompare();
+  buildCompareCharts();
+}
+
+// ── Tabs ──
+const TABS = ['overview','train','val','metrics','lr','compare'];
+document.querySelectorAll('.tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    activeTab = tab.dataset.tab;
+    document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t===tab));
+    TABS.forEach(t => {
+      document.getElementById('tab-'+t).style.display = t===activeTab ? '' : 'none';
+    });
+    // global slider hidden in compare tab
+    document.getElementById('global-slider').style.display = activeTab==='compare' ? 'none' : 'flex';
+    // resize charts in newly visible tab
+    setTimeout(() => {
+      Object.values(charts).forEach(c => c.resize());
+    }, 30);
+  });
+});
+
+function rebuildAll() {
+  buildSnapshot();
+  buildGroupCharts('overview-charts', ALL_METRICS.filter(m=>['mAP50','mAP50-95','Train Box Loss','Val Box Loss'].includes(m.label)));
+  buildGroupCharts('train-charts',   byGroup('train'));
+  buildGroupCharts('val-charts',     byGroup('val'));
+  buildGroupCharts('metrics-charts', byGroup('metrics'));
+  buildGroupCharts('lr-charts',      byGroup('lr'));
+  buildCompareAll();
+}
+</script>
+</body>
+</html>

@@ -105,7 +105,7 @@ def _print_cross_scale(trainer):
     }
     if values:
         vals_str = "  ".join(f"{k}={v}" for k, v in values.items())
-        print(f"[cross_scale ep={trainer.epoch+1} step={trainer._cross_scale_step}] {vals_str}")
+        print(f"\n[cross_scale ep={trainer.epoch+1} step={trainer._cross_scale_step}] {vals_str}")
 
 
 if __name__ == "__main__":
