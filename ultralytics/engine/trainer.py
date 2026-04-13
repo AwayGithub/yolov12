@@ -431,7 +431,13 @@ class BaseTrainer:
                 self.ema.update_attr(self.model, include=["yaml", "nc", "args", "names", "stride", "class_weights"])
 
                 # Validation
-                if (self.args.val and ((epoch + 1) % val_period == 0)) or final_epoch or self.stopper.possible_stop or self.stop:
+                did_validate = (
+                    (self.args.val and ((epoch + 1) % val_period == 0))
+                    or final_epoch
+                    or self.stopper.possible_stop
+                    or self.stop
+                )
+                if did_validate:
                     self.metrics, self.fitness = self.validate()
                 self.save_metrics(metrics={**self.label_loss_items(self.tloss), **self.metrics, **self.lr})
                 self.stop |= self.stopper(epoch + 1, self.fitness) or final_epoch
@@ -440,7 +446,7 @@ class BaseTrainer:
 
                 # Save model
                 if self.args.save or final_epoch:
-                    self.save_model()
+                    self.save_model(save_val_snapshot=did_validate)
                     self.run_callbacks("on_model_save")
 
             # Scheduler
@@ -512,7 +518,7 @@ class BaseTrainer:
 
         return pd.read_csv(self.csv).to_dict(orient="list")
 
-    def save_model(self):
+    def save_model(self, save_val_snapshot=False):
         """Save model training checkpoints with additional metadata."""
         import io
 
@@ -542,7 +548,7 @@ class BaseTrainer:
         self.last.write_bytes(serialized_ckpt)  # save last.pt
         if self.best_fitness == self.fitness:
             self.best.write_bytes(serialized_ckpt)  # save best.pt
-        if (self.save_period > 0) and (self.epoch % self.save_period == 0):
+        if save_val_snapshot or ((self.save_period > 0) and (self.epoch % self.save_period == 0)):
             (self.wdir / f"epoch{self.epoch}.pt").write_bytes(serialized_ckpt)  # save epoch, i.e. 'epoch3.pt'
         # if self.args.close_mosaic and self.epoch == (self.epochs - self.args.close_mosaic - 1):
         #    (self.wdir / "last_mosaic.pt").write_bytes(serialized_ckpt)  # save mosaic checkpoint
