@@ -747,7 +747,7 @@ class Metric(SimpleClass):
 
     def fitness(self):
         """Model fitness as a weighted combination of metrics."""
-        w = [0.0, 0.0, 0.1, 0.9]  # weights for [P, R, mAP@0.5, mAP@0.5:0.95]
+        w = [0.0, 0.2, 0.3, 0.5]  # weights for [P, R, mAP@0.5, mAP@0.5:0.95]; tuned for RGBT safety task: recall matters, smoke(mAP50) and fire/person(mAP50-95) both weighted
         return (np.array(self.mean_results()) * w).sum()
 
     def update(self, results):
