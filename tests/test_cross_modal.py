@@ -120,3 +120,46 @@ def test_dmg_fusion_param_count():
     m = DMGFusion(channels=64)
     n_params = sum(p.numel() for p in m.parameters())
     assert n_params < 20_000, f"Too many params: {n_params} (expected < 20K)"
+
+
+def test_dual_stream_p2_four_scale_stride():
+    """DualStream with p2 YAML produces 4 detection scales with strides [4,8,16,32]."""
+    from ultralytics.nn.tasks import DualStreamDetectionModel
+    model = DualStreamDetectionModel("yolov12-dual-p2.yaml", nc=3, verbose=False)
+    model.eval()
+    expected = torch.tensor([4.0, 8.0, 16.0, 32.0])
+    assert torch.equal(model.stride.sort().values, expected), \
+        f"Expected strides [4,8,16,32], got {model.stride}"
+
+
+def test_dual_stream_p2_forward_shape():
+    """DualStream P2 model forward pass returns valid output for 480x640 input."""
+    from ultralytics.nn.tasks import DualStreamDetectionModel
+    model = DualStreamDetectionModel("yolov12-dual-p2.yaml", nc=3, verbose=False)
+    model.eval()
+    x = torch.zeros(1, 6, 480, 640)
+    with torch.no_grad():
+        out = model(x)
+    assert out is not None
+
+
+def test_dual_stream_p2_uses_dmg_fusion():
+    """With p2_fusion=dmg, fusion_convs['p2'] is a DMGFusion instance."""
+    from ultralytics.nn.modules.block import DMGFusion
+    from ultralytics.nn.tasks import DualStreamDetectionModel
+    model = DualStreamDetectionModel("yolov12-dual-p2.yaml", nc=3, verbose=False)
+    assert isinstance(model.fusion_convs["p2"], DMGFusion), \
+        "fusion_convs['p2'] should be DMGFusion when p2_fusion=dmg"
+
+
+def test_dual_stream_p2_rejects_cmg_at_p2():
+    """Setting cmg_stages=[p2] must raise ValueError (p2 is not a valid CMG stage)."""
+    import pytest
+    from ultralytics.nn.tasks import DualStreamDetectionModel
+    from ultralytics.utils import yaml_load
+    from ultralytics.utils.checks import check_yaml
+    cfg_path = check_yaml("yolov12-dual-p2.yaml")
+    cfg = yaml_load(cfg_path)
+    cfg["cmg_stages"] = ["p2"]
+    with pytest.raises(ValueError, match="p2"):
+        DualStreamDetectionModel(cfg, nc=3, verbose=False)

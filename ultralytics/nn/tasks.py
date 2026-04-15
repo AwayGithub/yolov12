@@ -67,6 +67,7 @@ from ultralytics.nn.modules import (
     A2C2f,
     CrossModalGating,
     CrossModalA2C2f,
+    DMGFusion,
 )
 from ultralytics.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, colorstr, emojis, yaml_load
 from ultralytics.utils.checks import check_requirements, check_suffix, check_yaml
@@ -401,7 +402,9 @@ class DualStreamDetectionModel(DetectionModel):
     """
 
     # backbone 中 P3/P4/P5 特征的输出层全局索引（对应 yolov12-dual.yaml）
-    FUSION_LAYER_INDICES = {"p3": 4, "p4": 6, "p5": 8}
+    FUSION_LAYER_INDICES = {"p2": 2, "p3": 4, "p4": 6, "p5": 8}
+    # CMG and CMA require A2C2f layers (area-attention). p2 uses C3k2, so it is excluded.
+    _CMG_CMA_VALID_STAGES = frozenset({"p3", "p4", "p5"})
 
     def __init__(self, cfg="yolov12-dual.yaml", ch=None, nc=None, verbose=True):
         nn.Module.__init__(self)
@@ -432,8 +435,10 @@ class DualStreamDetectionModel(DetectionModel):
         self._cma_stages = set(self.yaml.get("cma_stages", []))
         self._cma_layer_to_stage = {}
         for stage_name in self._cma_stages:
-            if stage_name not in self.FUSION_LAYER_INDICES:
-                raise ValueError(f"cma_stages 中的 '{stage_name}' 不在 FUSION_LAYER_INDICES")
+            if stage_name not in self._CMG_CMA_VALID_STAGES:
+                raise ValueError(
+                    f"cma_stages 中的 '{stage_name}' 不合法，合法值为 {self._CMG_CMA_VALID_STAGES}"
+                )
             layer_idx = self.FUSION_LAYER_INDICES[stage_name]
             for backbone, tag in ((self.backbone_rgb, "rgb"), (self.backbone_ir, "ir")):
                 old_layer = backbone[layer_idx]
@@ -454,19 +459,25 @@ class DualStreamDetectionModel(DetectionModel):
         # 跨模态门控（仅在 cmg_stages 指定的层级，Exp-1 为空）
         self.cmg_modules = nn.ModuleDict()
         for stage_name in self._cmg_stages:
-            if stage_name not in self.FUSION_LAYER_INDICES:
-                raise ValueError(f"cmg_stages 中的 '{stage_name}' 不在 FUSION_LAYER_INDICES")
+            if stage_name not in self._CMG_CMA_VALID_STAGES:
+                raise ValueError(
+                    f"cmg_stages 中的 '{stage_name}' 不合法，合法值为 {self._CMG_CMA_VALID_STAGES}"
+                )
             c_out = self._get_layer_out_channels(self.backbone_rgb[self.FUSION_LAYER_INDICES[stage_name]])
             self.cmg_modules[stage_name] = nn.ModuleDict({
                 "rgb2ir": CrossModalGating(c_out),
                 "ir2rgb": CrossModalGating(c_out),
             })
 
-        # P3/P4/P5 融合：concat → 1×1 conv 降维
+        # P2/P3/P4/P5 融合：P2 可选 DMGFusion，其余 concat → 1×1 conv 降维
+        _p2_fusion_mode = self.yaml.get("p2_fusion", "plain")
         self.fusion_convs = nn.ModuleDict()
         for stage_name, layer_idx in self.FUSION_LAYER_INDICES.items():
             c_out = self._get_layer_out_channels(self.backbone_rgb[layer_idx])
-            self.fusion_convs[stage_name] = Conv(c_out * 2, c_out, 1, 1)
+            if stage_name == "p2" and _p2_fusion_mode == "dmg":
+                self.fusion_convs[stage_name] = DMGFusion(c_out)
+            else:
+                self.fusion_convs[stage_name] = Conv(c_out * 2, c_out, 1, 1)
 
         # 保留 self.model 引用（stride 计算 + 兼容 DetectionModel 方法）
         self.model = full_model
@@ -552,11 +563,12 @@ class DualStreamDetectionModel(DetectionModel):
             feats_rgb[stage_name] = cmg["ir2rgb"](rgb_f, ir_f)
             feats_ir[stage_name]  = cmg["rgb2ir"](ir_f,  rgb_f)
 
-        # concat + 1×1 conv 融合
+        # 融合：DMGFusion 接受 (rgb, ir)；其余接受 concat tensor
         fused = {}
         for stage_name in self.FUSION_LAYER_INDICES:
-            cat = torch.cat([feats_rgb[stage_name], feats_ir[stage_name]], dim=1)
-            fused[stage_name] = self.fusion_convs[stage_name](cat)
+            r, i = feats_rgb[stage_name], feats_ir[stage_name]
+            fc = self.fusion_convs[stage_name]
+            fused[stage_name] = fc(r, i) if isinstance(fc, DMGFusion) else fc(torch.cat([r, i], dim=1))
 
         # 构造 y 列表供 head 使用跳连索引
         y = [None] * (max(self.FUSION_LAYER_INDICES.values()) + 1)
