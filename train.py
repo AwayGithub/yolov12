@@ -19,6 +19,20 @@ def parse_args():
         help="early: 6ch 直接拼接输入单分支; middle: 双分支中期融合",
     )
     parser.add_argument(
+        "--cfg",
+        type=str,
+        default=None,
+        metavar="YAML",
+        help="覆盖默认模型 YAML，例如 yolov12-dual-p2.yaml",
+    )
+    parser.add_argument(
+        "--epochs",
+        type=int,
+        default=None,
+        metavar="N",
+        help="覆盖默认训练轮次（默认 300）",
+    )
+    parser.add_argument(
         "--resume",
         type=str,
         default=None,
@@ -115,6 +129,8 @@ if __name__ == "__main__":
 
     if args.resume:
         model = YOLO(args.resume)
+    elif args.cfg:
+        model = YOLO(args.cfg)
     elif args.fusion_stage == "middle" and args.input_mode == "dual_input":
         model = YOLO("yolov12-dual.yaml")  # 双分支中期融合，n scale
     else:
@@ -135,7 +151,7 @@ if __name__ == "__main__":
     results = model.train(
         data=data_cfg,
         resume=bool(args.resume),
-        epochs=300,
+        epochs=args.epochs if args.epochs is not None else 300,
         imgsz=[480, 640],  # 输入模型的尺寸，也是验证的尺寸
         batch=16,
         workers=0,

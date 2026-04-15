@@ -1,8 +1,8 @@
 # ADR-001: 双分支 YOLOv12-MF RGB-红外融合检测架构
 
-**Status:** 实验完成，当前最优 Exp-4c（CMG@P4P5 + 双向残差CMA@P5）
+**Status:** 实验进行中，当前最优 Exp-4c（CMG@P4P5 + 双向残差CMA@P5）；Exp-7（P2 head + DMGFusion）进行中
 **Date:** 2026-04-04
-**Updated:** 2026-04-14
+**Updated:** 2026-04-15
 **Deciders:** 研究者本人
 
 ---
@@ -209,8 +209,11 @@ def get_model(self, cfg=None, weights=None, verbose=True):
 | Exp-4d | 双分支 + CMG@P4P5 + 双向CMA@P4 | 0.931 | 0.623 | 0.923 | 0.887 | 4.47M | 16.68 | 完成 |
 | Exp-5 | RGB-only 3ch 单分支 | 0.907 | 0.583 | 0.920 | 0.854 | 2.51M | 4.08 | 完成 |
 | Exp-6 | IR-only 3ch 单分支 | 0.887 | 0.564 | 0.888 | 0.831 | 2.51M | 4.33 | 完成 |
+| **Exp-7a** ◆ | **Exp-4c + DMGFusion@P2 + 4-scale head** | — | — | — | — | ~5.53M | — | **进行中** |
+| Exp-7b | Exp-4c + plain Concat+Conv@P2 + 4-scale head | — | — | — | — | ~5.52M | — | 待运行 |
+| Exp-7c | Exp-7a，冻结 alpha=0, beta=1 | — | — | — | — | ~5.53M | — | 待运行 |
 
-> ★ 当前最优候选。GFLOPs 见下表（P4P5 组合因 thop 双流追踪问题偏低，以推理 ms 为准）。
+> ★ 当前最优候选。◆ Exp-7 主方案（DMGFusion@P2 差异引导融合，见想法 J）。GFLOPs 见下表（P4P5 组合因 thop 双流追踪问题偏低，以推理 ms 为准）。
 
 ### 3.2 参数量与计算量对比
 
@@ -227,6 +230,11 @@ def get_model(self, cfg=None, weights=None, verbose=True):
 - Exp-4c - Exp-4d = 5,226,851 - 4,473,187 = **753,664**（P5 比 P4 多，因 256²×2 - 128²×2 ≈ 753K ✓）
 - Exp-4b ≈ Exp-4d + Exp-4c - Exp-2：4,473,187 + 5,226,851 - 4,210,000 = **5,490,038 ≈ 5,488,997 ✓**
 - Exp-4b - Exp-4b-noCMG = 5,488,997 - 5,324,389 = **164,608 = CMG 4 实例精确参数量 ✓**
+
+**Exp-7 参数量估算（scale n）：**
+- Exp-7b（plain P2 fusion）≈ Exp-4c + P2 head + Conv(2c,c,1)@P2 ≈ 5.23M + ~0.29M ≈ **~5.52M**
+- Exp-7a（DMGFusion@P2）≈ Exp-7b - Conv(2c,c,1) + DMGFusion ≈ 5.52M - ~1K + ~12K ≈ **~5.53M**
+- DMGFusion 额外开销极小（~12K params，~230 MFLOPs @ 120×160），主要增量来自 P2 检测分支本身
 
 ### 3.3 分类别详细结果
 
@@ -627,11 +635,37 @@ class DifferenceGuidedFusion(nn.Module):
 
 根据检测头的类别预测概率动态调整融合权重。smoke 类检测时更信任 RGB，fire/person 类检测时更信任 IR。
 
-### 优先级
+### 想法 J：P2 检测头 + DMGFusion（差异引导模态融合）【已实现 → Exp-7】
 
-| 优先级 | 想法 | 理由 |
-|--------|------|------|
-| P0 | Exp-4b-noCMG 完整 val | 补全消融链 |
-| P1 | 想法 G（差异引导） | CMG 替代，代价低，物理动机强 |
-| P2 | 想法 H（频域） | 较复杂但差异化显著 |
-| P3 | 想法 I（类别感知） | 创新性强但工程复杂 |
+**动机：** §3.0 bbox 尺寸分析显示 fire/person 中位短边 ≈ 22px，在 stride=8（P3）下 35–38% 目标不足 2 格。增加 stride=4（P2）检测头可将 fire/person 覆盖率从 62% 提升至 95%。P2 处于低语义层级，两模态物理差异最大（RGB 纹理 vs IR 热梯度），朴素 Concat 会掩盖真正有判别力的"模态分歧"信号——阴影中的热源（person）、烟雾中的高亮火焰（fire）恰好是 RGB/IR 看法不一致但对检测最关键的区域。
+
+**DMGFusion（Differential Modality-Guided Fusion）结构：**
+- `D = |x_rgb - x_ir|`：逐像素模态分歧图
+- `W = softmax(sel([x_rgb; x_ir; D]))`：2 通道模态选择权重（可视化为红/蓝热力图）
+- `S = sigmoid(diff_enc(D))`：差异幅度调制门（(B,C,H,W)，可视化高响应区域）
+- `fused = (1 + alpha*S) * (w_rgb*x_rgb + w_ir*x_ir) + beta*0.5*(x_rgb+x_ir)`
+- `alpha` 初始化为 0，`beta` 初始化为 1 → 起点 ≡ 简单平均，训练自决定是否引入差异门控
+
+**参数/计算（scale n，C=64）：** ~12K 参数，~230 MFLOPs@120×160，远小于 P2 分支本身。
+
+**实现：**
+- `ultralytics/nn/modules/block.py` → `DMGFusion` 类
+- `ultralytics/cfg/models/v12/yolov12-dual-p2.yaml` → `p2_fusion: dmg`，4-scale head
+- `ultralytics/nn/tasks.py` → `FUSION_LAYER_INDICES` 扩展，pluggable fusion dispatch
+
+**消融计划（Exp-7）：**
+- Exp-7a（主方案）：DMGFusion@P2 + 4-scale head，保留 Exp-4c（CMG@P4P5 + CMA@P5）
+- Exp-7b（消融 P2 head 本身的增益）：plain Concat+Conv@P2 + 4-scale head
+- Exp-7c（消融差异门控学习能力）：Exp-7a 但冻结 alpha=0, beta=1
+
+**成功判定：** Exp-7a vs Exp-4c 的 fire mAP50-95 ≥ +2%，person mAP50-95 ≥ +2%；Exp-7a > Exp-7b ≥ +0.5%（证明 DMGFusion 相对朴素 P2 有额外增益）。
+
+### 优先级（更新后）
+
+| 优先级 | 想法 | 理由 | 状态 |
+|--------|------|------|------|
+| ~~P0~~ | ~~Exp-4b-noCMG 完整 val~~ | ~~补全消融链~~ | 已完成 |
+| **进行中** | **想法 J（DMGFusion@P2，Exp-7）** | **P2 head 覆盖率 +33pp，差异融合物理动机强** | **已实现，待训练** |
+| P1 | 想法 G（差异引导，P4P5 替代 CMG） | CMG 替代，代价低，物理动机强 | 待后续 |
+| P2 | 想法 H（频域） | 较复杂但差异化显著 | 待后续 |
+| P3 | 想法 I（类别感知） | 创新性强但工程复杂 | 待后续 |
