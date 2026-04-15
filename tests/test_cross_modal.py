@@ -107,6 +107,7 @@ def test_dmg_fusion_neutral_init():
     assert m.beta.item()  == 1.0, "beta must initialise to 1"
     x_rgb = torch.randn(2, 32, 8, 8, requires_grad=True)
     x_ir  = torch.randn(2, 32, 8, 8, requires_grad=True)
+    m.eval()
     out = m(x_rgb, x_ir)
     out.sum().backward()
     assert x_rgb.grad is not None, "gradient must flow to x_rgb"

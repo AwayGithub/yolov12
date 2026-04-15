@@ -1565,7 +1565,7 @@ class DMGFusion(nn.Module):
         # Gate scales — conservative init so the module starts as a plain mean
         self.alpha = nn.Parameter(torch.zeros(1))   # differential amplification; starts at 0
         self.beta  = nn.Parameter(torch.ones(1))    # mean-residual weight; starts at 1
-        self.out_proj = Conv(channels, channels, 1)  # output stabilisation
+        self.out_proj = Conv(channels, channels, 1, act=False)  # BN stabilisation, no activation
 
     def forward(self, x_rgb, x_ir):
         """Compute differential-guided fusion of RGB and IR P2 features."""
