@@ -1,0 +1,61 @@
+# YOLOv12-MF-P2: Dual-Stream RGB-IR with P2 detection head + DMGFusion (ADR-001 Exp-7)
+# Exp-4c + P2 head (stride=4) + DMGFusion at P2 fusion point
+# Backbone: identical to yolov12-dual.yaml (layers 0-8)
+# P2 fusion point: backbone layer 2 (C3k2 256, stride=4, 120x160 at 480x640 input)
+
+nc: 3           # smoke, fire, person
+ch: 6           # 6-channel dual-stream input
+dual_stream: true
+
+cmg_stages: [p4, p5]   # Exp-4c: SE channel gating at P4, P5
+cma_stages: [p5]        # Exp-4c: bidirectional CMA at P5 only
+p2_fusion: dmg          # P2 fusion mode: dmg = DMGFusion, plain = Concat+Conv1x1
+
+scales:
+  n: [0.50, 0.25, 1024]
+  s: [0.50, 0.50, 1024]
+
+# Backbone -- identical to yolov12-dual.yaml (do not modify)
+# P2 fusion point = layer 2 output (C3k2 256, stride=4)
+backbone:
+  # [from, repeats, module, args]
+  - [-1, 1, Conv,   [64, 3, 2]]           # 0-P1/2
+  - [-1, 1, Conv,   [128, 3, 2, 1, 2]]    # 1-P2/4
+  - [-1, 2, C3k2,   [256, False, 0.25]]   # 2 <- P2 fusion point
+  - [-1, 1, Conv,   [256, 3, 2, 1, 4]]    # 3-P3/8
+  - [-1, 2, C3k2,   [512, False, 0.25]]   # 4 <- P3 fusion point
+  - [-1, 1, Conv,   [512, 3, 2]]          # 5-P4/16
+  - [-1, 4, A2C2f,  [512, True, 4]]       # 6 <- P4 fusion point
+  - [-1, 1, Conv,   [1024, 3, 2]]         # 7-P5/32
+  - [-1, 4, A2C2f,  [1024, True, 1]]      # 8 <- P5 fusion point
+
+# Head -- extended FPN+PAN to 4 scales (P2/P3/P4/P5)
+# Global layer indices continue from 9 (backbone ends at 8)
+head:
+  # -- Top-down path (P5->P4->P3->P2) --
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]   # 9  -- upsample P5
+  - [[-1, 6], 1, Concat, [1]]                    # 10 -- cat P4 backbone
+  - [-1, 2, A2C2f, [512, False, -1]]              # 11 -- P4 top-down result
+
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]   # 12 -- upsample P4 top-down
+  - [[-1, 4], 1, Concat, [1]]                    # 13 -- cat P3 backbone
+  - [-1, 2, A2C2f, [256, False, -1]]              # 14 -- P3 top-down result
+
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]   # 15 -- upsample P3 top-down
+  - [[-1, 2], 1, Concat, [1]]                    # 16 -- cat P2 fused (DualStream y[2])
+  - [-1, 2, C3k2, [128, False, 0.25]]             # 17 -- P2/4 output
+
+  # -- Bottom-up path (P2->P3->P4->P5) --
+  - [-1, 1, Conv, [128, 3, 2]]                   # 18 -- downsample P2->P3
+  - [[-1, 14], 1, Concat, [1]]                   # 19 -- cat P3 top-down (layer 14)
+  - [-1, 2, A2C2f, [256, False, -1]]              # 20 -- P3/8 final
+
+  - [-1, 1, Conv, [256, 3, 2]]                   # 21 -- downsample P3->P4
+  - [[-1, 11], 1, Concat, [1]]                   # 22 -- cat P4 top-down (layer 11)
+  - [-1, 2, A2C2f, [512, False, -1]]              # 23 -- P4/16 final
+
+  - [-1, 1, Conv, [512, 3, 2]]                   # 24 -- downsample P4->P5
+  - [[-1, 8], 1, Concat, [1]]                    # 25 -- cat P5 fused (DualStream y[8])
+  - [-1, 2, C3k2, [1024, True]]                  # 26 -- P5/32 final
+
+  - [[17, 20, 23, 26], 1, Detect, [nc]]           # 27 -- Detect(P2, P3, P4, P5)
