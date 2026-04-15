@@ -87,3 +87,35 @@ def test_dual_stream_cma_bidirectional():
             f"backbone_ir[{layer_idx}] should be CrossModalA2C2f (bidirectional)"
         # Weights must be independent (different objects)
         assert model.backbone_rgb[layer_idx] is not model.backbone_ir[layer_idx]
+
+
+def test_dmg_fusion_output_shape():
+    """DMGFusion preserves spatial dims and channel count."""
+    from ultralytics.nn.modules.block import DMGFusion
+    m = DMGFusion(channels=64)
+    x_rgb = torch.randn(2, 64, 120, 160)
+    x_ir  = torch.randn(2, 64, 120, 160)
+    out = m(x_rgb, x_ir)
+    assert out.shape == (2, 64, 120, 160), f"Expected (2,64,120,160), got {out.shape}"
+
+
+def test_dmg_fusion_neutral_init():
+    """At alpha=0, beta=1, gradients reach both inputs."""
+    from ultralytics.nn.modules.block import DMGFusion
+    m = DMGFusion(channels=32)
+    assert m.alpha.item() == 0.0, "alpha must initialise to 0"
+    assert m.beta.item()  == 1.0, "beta must initialise to 1"
+    x_rgb = torch.randn(2, 32, 8, 8, requires_grad=True)
+    x_ir  = torch.randn(2, 32, 8, 8, requires_grad=True)
+    out = m(x_rgb, x_ir)
+    out.sum().backward()
+    assert x_rgb.grad is not None, "gradient must flow to x_rgb"
+    assert x_ir.grad  is not None, "gradient must flow to x_ir"
+
+
+def test_dmg_fusion_param_count():
+    """DMGFusion for C=64 should have fewer than 20K parameters."""
+    from ultralytics.nn.modules.block import DMGFusion
+    m = DMGFusion(channels=64)
+    n_params = sum(p.numel() for p in m.parameters())
+    assert n_params < 20_000, f"Too many params: {n_params} (expected < 20K)"

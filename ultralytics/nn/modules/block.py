@@ -50,6 +50,7 @@ __all__ = (
     "PSA",
     "SCDown",
     "TorchVision",
+    "DMGFusion",
 )
 
 
@@ -1524,3 +1525,54 @@ class CrossModalA2C2f(nn.Module):
             y.append(m_s(y[-1]) + self.cross_scale * m_c(y[-1], feat_other))
 
         return self.cv2(torch.cat(y, 1))
+
+
+class DMGFusion(nn.Module):
+    """Differential Modality-Guided Fusion for P2 RGB-IR streams (ADR-001 §6, Exp-7).
+
+    Computes a per-pixel modality selection map W from the concatenation of both streams
+    and their absolute difference D = |RGB - IR|. Regions of high disagreement are
+    amplified by a learnable differential gate alpha, which starts at 0 (neutral) and
+    grows only if the training signal warrants it.
+
+    Args:
+        channels (int): Channel count C of each input stream.
+        diff_hidden_ratio (float): Bottleneck ratio for the difference encoder. Default 0.25.
+
+    Inputs:
+        x_rgb (Tensor): (B, C, H, W) — RGB branch P2 features.
+        x_ir  (Tensor): (B, C, H, W) — IR  branch P2 features.
+
+    Returns:
+        Tensor: (B, C, H, W) fused features.
+    """
+
+    def __init__(self, channels: int, diff_hidden_ratio: float = 0.25):
+        """Initialise DMGFusion with modality selection and differential encoder branches."""
+        super().__init__()
+        c_diff = max(8, int(channels * diff_hidden_ratio))
+        # Modality selection: [R; I; D] -> (B, 2, H, W) softmax weights
+        self.sel = nn.Sequential(
+            Conv(channels * 3, c_diff, 1),           # 1x1 cross-channel mixing
+            Conv(c_diff, c_diff, 3, g=c_diff),        # 3x3 DWConv for local spatial context
+            nn.Conv2d(c_diff, 2, 1, bias=True),        # 2-ch logits: {w_rgb, w_ir}
+        )
+        # Differential amplitude encoder: D -> (B, C, H, W) saliency in [0, 1]
+        self.diff_enc = nn.Sequential(
+            Conv(channels, c_diff, 1),
+            nn.Conv2d(c_diff, channels, 1, bias=True),
+        )
+        # Gate scales — conservative init so the module starts as a plain mean
+        self.alpha = nn.Parameter(torch.zeros(1))   # differential amplification; starts at 0
+        self.beta  = nn.Parameter(torch.ones(1))    # mean-residual weight; starts at 1
+        self.out_proj = Conv(channels, channels, 1)  # output stabilisation
+
+    def forward(self, x_rgb, x_ir):
+        """Compute differential-guided fusion of RGB and IR P2 features."""
+        D = torch.abs(x_rgb - x_ir)                                              # (B, C, H, W)
+        W = torch.softmax(self.sel(torch.cat([x_rgb, x_ir, D], dim=1)), dim=1)   # (B, 2, H, W)
+        w_rgb, w_ir = W[:, 0:1], W[:, 1:2]                                       # (B, 1, H, W) each
+        S = torch.sigmoid(self.diff_enc(D))                                       # (B, C, H, W)
+        modal_selected = w_rgb * x_rgb + w_ir * x_ir                             # (B, C, H, W)
+        fused = (1.0 + self.alpha * S) * modal_selected + self.beta * 0.5 * (x_rgb + x_ir)
+        return self.out_proj(fused)
