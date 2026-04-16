@@ -574,76 +574,9 @@ CMA 层级选择的完整对比：
 
 ## 六、备选想法
 
-> 以下方案基于当前实验结论探索进一步改进方向。
+> 以下方案基于当前实验结论探索进一步改进方向。重点：**P2 层级跨模态融合**（高分辨率 120×160，C=64，两模态物理差异最大）。按复杂度分三档。
 
-### 想法 A：Depthwise 跨模态卷积门控（最轻量替代 CMG）
-
-DWConv 沿空间维度滑窗，内存访问连续，GPU 友好。参数量极小（~19K），提供空间+通道联合门控。适合快速消融"空间门控方向是否有价值"（排除 CM-CBAM 因实现低效而非方案本身无效的可能）。
-
-```python
-class CrossModalDWGating(nn.Module):
-    def __init__(self, channels, kernel_size=5):
-        super().__init__()
-        self.dw = nn.Sequential(
-            nn.Conv2d(channels, channels, kernel_size,
-                      padding=kernel_size // 2, groups=channels, bias=False),
-            nn.BatchNorm2d(channels),
-        )
-
-    def forward(self, target, guide):
-        gate = torch.sigmoid(self.dw(guide))  # (B, C, H, W) 空间+通道门控
-        return target * gate + target
-```
-
-### 想法 B：Channel Shuffle 跨模态交换（零参数消融）
-
-零参数、零额外计算。强制后续层在混合通道上学习，验证"跨模态信息流动本身是否有价值"。
-
-```python
-# 在 P4/P5 融合点，交换 25% 通道后各自继续 backbone
-c = x_rgb.shape[1]; swap = c // 4
-x_rgb_new = torch.cat([x_rgb[:, :c-swap], x_ir[:, :swap]], dim=1)
-x_ir_new  = torch.cat([x_ir[:, :c-swap], x_rgb[:, :swap]], dim=1)
-```
-
-### 想法 C：双向特征蒸馏（训练时增强，推理零开销）
-
-训练时在 loss 中添加辅助蒸馏项，迫使每个分支在特征空间逼近另一模态的表征；推理时移除 project 头和蒸馏损失，零推理开销。
-
-```python
-loss_distill = (
-    F.mse_loss(project_rgb(feats_rgb['p4']), feats_ir['p4'].detach()) +
-    F.mse_loss(project_ir(feats_ir['p4']), feats_rgb['p4'].detach()) +
-    F.mse_loss(project_rgb(feats_rgb['p5']), feats_ir['p5'].detach()) +
-    F.mse_loss(project_ir(feats_ir['p5']), feats_rgb['p5'].detach())
-)
-total_loss = loss_detect + lambda_distill * loss_distill  # lambda_distill ~ 0.1
-```
-
-### 想法 G：差异引导融合（替代 CMG 的新方向）
-
-用 `|x_rgb - x_ir|` 作为门控信号，差异图直接编码"两种模态看法不一致的区域"，比 GAP 全局门控信息量丰富得多，比 CMA 更轻量。
-
-```python
-class DifferenceGuidedFusion(nn.Module):
-    def __init__(self, channels):
-        super().__init__()
-        self.diff_encoder = Conv(channels, channels // 4, 1)
-        self.gate = nn.Sequential(Conv(channels // 4, channels, 1), nn.Sigmoid())
-
-    def forward(self, x_rgb, x_ir):
-        diff = torch.abs(x_rgb - x_ir)
-        gate = self.gate(self.diff_encoder(diff))
-        return x_rgb + gate * x_ir
-```
-
-### 想法 H：频域解耦融合
-
-通过 FFT 将特征分解为低频（全局语义）和高频（局部纹理），对不同频段施加不同的跨模态融合策略。IR 在低频（热源区域语义）有优势，RGB 在高频（纹理细节）有优势。
-
-### 想法 I：类别感知动态门控
-
-根据检测头的类别预测概率动态调整融合权重。smoke 类检测时更信任 RGB，fire/person 类检测时更信任 IR。
+---
 
 ### 想法 J：P2 检测头 + DMGFusion（差异引导模态融合）【已实现 → Exp-7】
 
@@ -677,15 +610,228 @@ class DifferenceGuidedFusion(nn.Module):
 
 **成功判定：** Exp-7a vs Exp-4c 的 fire mAP50-95 ≥ +2%，person mAP50-95 ≥ +2%；Exp-7a > Exp-7b ≥ +0.5%（证明 DMGFusion 相对朴素 P2 有额外增益）；Exp-7a > Exp-7c（证明 P2 检测头有效）。
 
-### 优先级（更新后）
+---
+
+## Tier 1：轻量 P2 融合（~10–100K params，Exp-7 消融后可直接跑）
+
+### 想法 K：差异掩码交叉注意力（DMCA）
+
+**物理动机：** P2 大部分区域两模态一致（背景、地面）；只有少数区域真正不一致（烟雾中的热源、阴影中的人体）。对所有位置做注意力是浪费；只在"模态分歧大的地方"做跨模态注意力才有信息增益。
+
+**机制：**
+```
+D_scalar = mean_c(|RGB - IR|)            (B, 1, H, W) 差异标量图
+mask     = topK(D_scalar, ρ=20%)         (B, H*W) 稀疏二值掩码
+
+mask=1 位置：Q=RGB, KV=IR 做局部窗口交叉注意力（4×4 window）
+mask=0 位置：(RGB + IR) / 2
+
+fused = routing * attn_out + (1 - routing) * mean_out
+```
+
+**与 DMGFusion 的区别：** DMGFusion 是软加权（全局参与），DMCA 是硬路由（只有分歧大的位置进入注意力），计算集中在最有价值的像素，注意力图可直接可视化"模型在哪里做了跨模态推理"。
+
+**规模（C=64）：** ~30K params，局部窗口注意力 ~150 MFLOPs @120×160。
+
+---
+
+### 想法 L：迭代差异精炼（IDR）
+
+**物理动机：** 单次融合无法解决所有模态歧义（烟雾半透明性在 RGB/IR 中表现复杂）。多轮精炼把"上一轮没搞清楚的区域"作为下一轮的重点，类似 EM 算法的迭代收敛。
+
+**机制：**
+```
+F0 = (RGB + IR) / 2                                    粗融合
+D1 = |RGB - F0| + |IR - F0|                           残差不一致图（第1轮）
+F1 = F0 + gate_net(D1) * cross_attn(F0, D1)           第1轮精炼
+D2 = |RGB - F1| + |IR - F1|                           残差不一致图（第2轮）
+F2 = F1 + gate_net(D2) * mlp(F1, D2)                  第2轮精炼（更轻量）
+```
+
+**创新点：** 将"模态差异"从静态输入信号变为动态收敛过程——每轮残差 D_i 都在缩小，可以用残差曲线作为收敛指标，也可以可视化各轮"哪些区域还有歧义"。
+
+**规模：** 2–3 层共 ~60K params。
+
+---
+
+### 想法 M：基函数分解融合（BDF）
+
+**物理动机：** RGB 和 IR 特征共享部分语义基（物体形状、位置），但各有专属基（纹理 vs 热值）。融合应发生在"共享子空间"，而不是原始特征空间——在高维特征空间直接融合会混淆模态专属信息。
+
+**机制：**
+```
+共享字典 B ∈ R^{K×C}，K=16 个可学习基向量
+A_rgb = softmax(RGB @ B^T / sqrt(C))   (B, K, H, W) RGB 在共享基上的系数
+A_ir  = softmax(IR  @ B^T / sqrt(C))   (B, K, H, W) IR  在共享基上的系数
+A_fused = f(A_rgb, A_ir)               在系数空间融合（可以是注意力、gating）
+fused = A_fused @ B                    重建回特征空间
+```
+
+**创新点：** 字典 B 可以可视化（每个基向量学到了什么语义模式），系数融合比特征融合更可解释；字典初始化策略也是一个消融维度。
+
+**规模：** 字典 2K + fusion net ~30K，共 **~35K params**。
+
+---
+
+## Tier 2：中量 P2 融合（~100–500K params，独立子贡献）
+
+### 想法 N：稀疏差异条件交叉注意力（SDC-Attn）
+
+**想法 K 的完整版**，用软路由替代硬 top-K，加入差异 token 全局上下文。
+
+**机制：**
+```
+D_scalar  = mean_c(|RGB - IR|)                        (B, 1, H, W)
+routing   = sigmoid(route_net(D_scalar))               (B, 1, H, W) 软路由权重
+
+# 高分歧路径（贵但精确）：局部窗口交叉注意力（8×8 window）
+Q = proj_q(RGB),  K = proj_k(IR),  V = proj_v(IR)
+attn_out = window_attn(Q, K, V, window=8)
+
+# 差异 token：D 的全局压缩，注入注意力作为额外 KV（全局上下文）
+diff_token = gap(diff_enc(D_scalar))                   (B, 1, C)
+attn_out   = inject_token(attn_out, diff_token)
+
+# 低分歧路径（便宜）
+cheap_out = conv1x1(concat(RGB, IR))
+
+# 软混合
+fused = routing * attn_out + (1 - routing) * cheap_out
+```
+
+**与 DMCA 的区别：** 软路由梯度更友好；差异 token 将"全局有多不一致"注入局部注意力，使每个窗口的注意力都知道全局背景。
+
+**规模（C=64，w=8）：** ~150K params，~400 MFLOPs。
+
+---
+
+### 想法 O：频域解耦跨模态融合（FDCF）
+
+**物理动机：**
+- IR 低频（全局热场、目标轮廓）比 RGB 低频更可靠（烟雾遮挡对 IR 影响小）
+- RGB 高频（纹理、边缘细节）比 IR 高频更丰富（IR 分辨率低，高频噪声大）
+- 统一在特征空间处理是次优的——不同频段的最优融合策略从物理上就不同
+
+**机制（用 Haar 小波，比 FFT 快且可逆）：**
+```
+LL_rgb, HH_rgb = haar_decomp(RGB)         低频/高频分量
+LL_ir,  HH_ir  = haar_decomp(IR)
+
+# 低频：IR 主导（IR-guided attention on RGB）
+LL_fused = ir_guided_attn(LL_rgb, guide=LL_ir)
+
+# 高频：RGB 主导，差异引导（只在高频不一致处融合）
+D_hf = |HH_rgb - HH_ir|
+HH_fused = rgb_dominant_gate(HH_rgb, HH_ir, cond=D_hf)
+
+fused = haar_recon(LL_fused, HH_fused)
+```
+
+**创新点：** 给"低频用 IR、高频用 RGB"这一物理先验赋予了学习能力；小波保持精确空间可逆性，可与任意注意力机制正交叠加；低频/高频分支可独立消融。
+
+**规模：** ~200K params。
+
+---
+
+### 想法 P：原型路由融合专家（PMoFE）
+
+**物理动机：** "模态分歧"不是一维概念——烟雾中的热源、阴影中的人体、明火、低分歧背景这四种场景需要的不仅仅是不同强度的融合，而是不同类型的融合策略。MoE（Mixture-of-Experts）是建模这种离散多样性的自然工具。
+
+**机制：**
+```
+K=4 个融合专家（每个 2层卷积，各自独立参数）：
+  Expert 0: IR 强主导（热源在烟雾中，IR 有信号而 RGB 被遮挡）
+  Expert 1: RGB 强主导（明亮纹理区域，IR 饱和）
+  Expert 2: 对称融合（目标边界，两模态同等重要）
+  Expert 3: 直通均值（背景区域，两模态一致）
+
+Router: mean_c(|RGB - IR|) → conv → softmax  (B, K, H, W) 逐像素专家权重
+fused = sum_k gate_k * Expert_k(RGB, IR)
+```
+
+**创新点：** 将"融合策略多样性"显式建模；专家权重图可直接可视化（哪个区域用哪种策略，对应哪类场景）；路由器本身是论文 qualitative result 的极好来源。
+
+**规模：** 4 专家 × ~50K + router ~20K = **~220K params**。
+
+---
+
+## Tier 3：重量 P2 融合（~400K+，主要贡献方向）
+
+### 想法 Q：差异条件可变形交叉注意力（DCDA）
+
+**物理动机：** RGB 和 IR 传感器存在视差（光学轴不完全对齐），烟雾/玻璃使两模态的"有效感受野"在空间上错位。标准注意力假设特征对齐，但 P2 高分辨率处对齐误差最大。可变形注意力允许模型学习在另一模态的哪个偏移位置寻找对应信息，而差异图 D 可以驱动偏移量——分歧越大，允许查找越远的位置（更大的错位补偿）。
+
+**机制：**
+```
+D_scalar    = mean_c(|RGB - IR|)                              (B, 1, H, W)
+offset_scale = sigmoid(offset_gate(D_scalar))                 分歧大→允许大偏移
+offsets     = offset_net(D_scalar) * offset_scale * max_disp  (B, 2·n_pts, H, W)
+
+IR_sampled  = deform_sample(IR, offsets)                      IR 的偏移位置采样
+offsets_inv = offset_net_inv(D_scalar) * offset_scale         反向偏移（RGB→IR）
+RGB_sampled = deform_sample(RGB, offsets_inv)
+
+Q = proj(RGB),  K = proj(IR_sampled),  V = IR_sampled
+attn_out = softmax(Q @ K^T / sqrt(C)) @ V                     对齐后交叉注意力
+
+fused = out_proj(concat(attn_out, RGB_sampled))
+```
+
+**创新点：** D 条件偏移是本方案独特之处——模型自适应学习补偿传感器视差，偏移场可视化（箭头图）是极强的定性结果；可变形采样 + 交叉注意力的完整组合，理论上是 P2 融合的上界方案。
+
+**规模（C=64，n_pts=4）：** ~500K params，~600 MFLOPs。
+
+---
+
+### 想法 R：因果层级差异分解网络（CHDD）
+
+**物理动机：** 模态差异有尺度结构——局部差异（传感器噪声，~2px）、中尺度差异（目标边界热梯度，~16px）、全局差异（场景级互补，整图烟雾遮挡程度）。单一融合层无法同时处理三个尺度，且三个尺度的最优处理策略完全不同。
+
+**机制：**
+```
+D = |RGB - IR|
+D_local  = D                                           原始分辨率（局部噪声/错位）
+D_mid    = avgpool(D, 4×4) → bilinear upsample         中尺度（目标边界）
+D_global = gap(D) → broadcast                          全局标量（场景级）
+
+# 三个尺度专属融合头
+F_local  = local_window_attn(RGB, IR, cond=D_local)    小窗口交叉注意力 (4×4)
+F_mid    = channel_gate(RGB, IR, cond=D_mid)           通道门控（中等代价）
+F_global = modality_select(RGB, IR, cond=D_global)     全局模态选择
+
+# 因果聚合：局部 → 中 → 全局，逐步精炼
+F1 = F_local
+F2 = F1 + cross_gate(F_mid,    F1)    中尺度信息精炼局部结果
+F3 = F2 + cross_gate(F_global, F2)    全局信息精炼中尺度结果
+fused = out_proj(F3)
+```
+
+**创新点：** 将"差异的尺度层级"显式建模并按因果顺序聚合（先局部后全局）；每层可单独消融（3个控制变量），消融矩阵本身即论文 Table；三个尺度的权重图各具不同视觉意义。
+
+**规模：** ~700K params（可用共享主干减半至 ~400K）。
+
+---
+
+### 想法 I：类别感知动态门控（跨层级，非P2专属）
+
+根据检测头的类别预测概率动态调整融合权重。smoke 类检测时更信任 RGB（可见光纹理），fire/person 类检测时更信任 IR（热特征）。实现上需要把检测头的 soft prediction 反传回融合层，工程复杂度高，适合在主方案稳定后探索。
+
+---
+
+## 优先级（更新后）
 
 | 优先级 | 想法 | 理由 | 状态 |
 |--------|------|------|------|
-| ~~P0~~ | ~~Exp-4b-noCMG 完整 val~~ | ~~补全消融链~~ | 已完成 |
-| **进行中** | **想法 J Exp-7a**（DMGFusion@P2 + P2P3P4P5 head） | **主方案** | **训练中 tmux0** |
-| **进行中** | **想法 J Exp-7b**（Concat+Conv@P2 + P2P3P4P5 head） | **消融：融合方式** | **训练中 tmux1** |
-| 待运行 | 想法 J Exp-7c（DMGFusion@P2 + P3P4P5 head） | 消融：P2检测头的贡献 | 待运行 |
-| 待运行 | 想法 J Exp-7d（Concat+Conv@P2 + P3P4P5 head） | 消融：P2融合涟漪效应 | 待运行 |
-| 后续 | 想法 G（差异引导，P4P5 替代 CMG） | CMG 替代，代价低，物理动机强 | 待后续 |
-| 后续 | 想法 H（频域） | 较复杂但差异化显著 | 待后续 |
-| 后续 | 想法 I（类别感知） | 创新性强但工程复杂 | 待后续 |
+| **进行中** | **J Exp-7a**（DMGFusion@P2 + P2P3P4P5 head） | 主方案 | 训练中 tmux0 |
+| **进行中** | **J Exp-7b**（Concat+Conv@P2 + P2P3P4P5 head） | 消融：融合方式 | 训练中 tmux1 |
+| 待运行 | J Exp-7c（DMGFusion@P2 + P3P4P5 head） | 消融：P2检测头贡献 | 待运行 |
+| 待运行 | J Exp-7d（Concat+Conv@P2 + P3P4P5 head） | 消融：P2融合涟漪效应 | 待运行 |
+| 后续（轻量） | **K** DMCA | 硬路由稀疏注意力，可视化强 | 待后续 |
+| 后续（轻量） | **L** IDR | 迭代精炼，EM 风格 | 待后续 |
+| 后续（轻量） | **M** BDF | 共享基函数，可解释 | 待后续 |
+| 后续（中量） | **N** SDC-Attn | DMCA 软路由完整版 + 差异 token | 待后续 |
+| 后续（中量） | **O** FDCF | 频域解耦，物理先验强 | 待后续 |
+| 后续（中量） | **P** PMoFE | MoE 融合专家，路由可视化 | 待后续 |
+| 后续（重量） | **Q** DCDA | 可变形对齐 + 注意力，上界方案 | 待后续 |
+| 后续（重量） | **R** CHDD | 层级差异分解，消融矩阵完整 | 待后续 |
+| 长期 | **I** 类别感知门控 | 创新性强但工程复杂 | 待后续 |
