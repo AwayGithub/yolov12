@@ -1,6 +1,6 @@
 # ADR-001: 双分支 YOLOv12-MF RGB-红外融合检测架构
 
-**Status:** 实验进行中，当前最优 Exp-4c（CMG@P4P5 + 双向残差CMA@P5）；Exp-7（P2 head + DMGFusion）进行中
+**Status:** 实验进行中，当前最优 Exp-4c（CMG@P4P5 + 双向残差CMA@P5）；Exp-7a/7b 训练中（tmux0/tmux1），Exp-7c/7d 待运行
 **Date:** 2026-04-04
 **Updated:** 2026-04-15
 **Deciders:** 研究者本人
@@ -209,11 +209,21 @@ def get_model(self, cfg=None, weights=None, verbose=True):
 | Exp-4d | 双分支 + CMG@P4P5 + 双向CMA@P4 | 0.931 | 0.623 | 0.923 | 0.887 | 4.47M | 16.68 | 完成 |
 | Exp-5 | RGB-only 3ch 单分支 | 0.907 | 0.583 | 0.920 | 0.854 | 2.51M | 4.08 | 完成 |
 | Exp-6 | IR-only 3ch 单分支 | 0.887 | 0.564 | 0.888 | 0.831 | 2.51M | 4.33 | 完成 |
-| **Exp-7a** ◆ | **Exp-4c + DMGFusion@P2 + 4-scale head** | — | — | — | — | ~5.53M | — | **进行中** |
-| Exp-7b | Exp-4c + plain Concat+Conv@P2 + 4-scale head | — | — | — | — | ~5.52M | — | 待运行 |
-| Exp-7c | Exp-7a，冻结 alpha=0, beta=1 | — | — | — | — | ~5.53M | — | 待运行 |
+| **Exp-7a** ◆ | **DMGFusion@P2 + CMG@P4P5 + CMA@P5 + head P2P3P4P5** | — | — | — | — | ~5.53M | — | **训练中 (tmux0)** |
+| Exp-7b | Concat+1×1Conv@P2 + CMG@P4P5 + CMA@P5 + head P2P3P4P5 | — | — | — | — | ~5.52M | — | **训练中 (tmux1)** |
+| Exp-7c | DMGFusion@P2 + CMG@P4P5 + CMA@P5 + head P3P4P5（无P2检测） | — | — | — | — | ~5.53M | — | 待运行 |
+| Exp-7d | Concat+1×1Conv@P2 + CMG@P4P5 + CMA@P5 + head P3P4P5（无P2检测） | — | — | — | — | ~5.52M | — | 待运行 |
 
 > ★ 当前最优候选。◆ Exp-7 主方案（DMGFusion@P2 差异引导融合，见想法 J）。GFLOPs 见下表（P4P5 组合因 thop 双流追踪问题偏低，以推理 ms 为准）。
+>
+> **Exp-7 消融矩阵**（2×2 设计）：
+>
+> | | head P2P3P4P5 | head P3P4P5（无P2检测） |
+> |---|---|---|
+> | **DMGFusion@P2** | Exp-7a（主方案） | Exp-7c |
+> | **Concat+1×1Conv@P2** | Exp-7b | Exp-7d |
+>
+> 对比链：7a vs 7b → 融合方式的影响；7a vs 7c → P2检测头的贡献；7c vs Exp-4c → P2融合本身（无检测头）的影响。
 
 ### 3.2 参数量与计算量对比
 
@@ -653,19 +663,29 @@ class DifferenceGuidedFusion(nn.Module):
 - `ultralytics/cfg/models/v12/yolov12-dual-p2.yaml` → `p2_fusion: dmg`，4-scale head
 - `ultralytics/nn/tasks.py` → `FUSION_LAYER_INDICES` 扩展，pluggable fusion dispatch
 
-**消融计划（Exp-7）：**
-- Exp-7a（主方案）：DMGFusion@P2 + 4-scale head，保留 Exp-4c（CMG@P4P5 + CMA@P5）
-- Exp-7b（消融 P2 head 本身的增益）：plain Concat+Conv@P2 + 4-scale head
-- Exp-7c（消融差异门控学习能力）：Exp-7a 但冻结 alpha=0, beta=1
+**消融计划（Exp-7，2×2 矩阵）：**
 
-**成功判定：** Exp-7a vs Exp-4c 的 fire mAP50-95 ≥ +2%，person mAP50-95 ≥ +2%；Exp-7a > Exp-7b ≥ +0.5%（证明 DMGFusion 相对朴素 P2 有额外增益）。
+| | head P2P3P4P5 | head P3P4P5（无P2检测） |
+|---|---|---|
+| **DMGFusion@P2** | **Exp-7a（训练中 tmux0）** | Exp-7c（待运行） |
+| **Concat+1×1Conv@P2** | Exp-7b（训练中 tmux1） | Exp-7d（待运行） |
+
+- Exp-7a vs Exp-7b：DMGFusion vs 朴素融合的增益（控制：均有P2检测头）
+- Exp-7a vs Exp-7c：P2检测头的直接贡献（控制：均用DMGFusion）
+- Exp-7b vs Exp-7d：P2检测头增益（控制：均用朴素concat）
+- Exp-7c/7d vs Exp-4c：仅P2特征融合（不用于检测）对P3P4P5的涟漪影响
+
+**成功判定：** Exp-7a vs Exp-4c 的 fire mAP50-95 ≥ +2%，person mAP50-95 ≥ +2%；Exp-7a > Exp-7b ≥ +0.5%（证明 DMGFusion 相对朴素 P2 有额外增益）；Exp-7a > Exp-7c（证明 P2 检测头有效）。
 
 ### 优先级（更新后）
 
 | 优先级 | 想法 | 理由 | 状态 |
 |--------|------|------|------|
 | ~~P0~~ | ~~Exp-4b-noCMG 完整 val~~ | ~~补全消融链~~ | 已完成 |
-| **进行中** | **想法 J（DMGFusion@P2，Exp-7）** | **P2 head 覆盖率 +33pp，差异融合物理动机强** | **已实现，待训练** |
-| P1 | 想法 G（差异引导，P4P5 替代 CMG） | CMG 替代，代价低，物理动机强 | 待后续 |
-| P2 | 想法 H（频域） | 较复杂但差异化显著 | 待后续 |
-| P3 | 想法 I（类别感知） | 创新性强但工程复杂 | 待后续 |
+| **进行中** | **想法 J Exp-7a**（DMGFusion@P2 + P2P3P4P5 head） | **主方案** | **训练中 tmux0** |
+| **进行中** | **想法 J Exp-7b**（Concat+Conv@P2 + P2P3P4P5 head） | **消融：融合方式** | **训练中 tmux1** |
+| 待运行 | 想法 J Exp-7c（DMGFusion@P2 + P3P4P5 head） | 消融：P2检测头的贡献 | 待运行 |
+| 待运行 | 想法 J Exp-7d（Concat+Conv@P2 + P3P4P5 head） | 消融：P2融合涟漪效应 | 待运行 |
+| 后续 | 想法 G（差异引导，P4P5 替代 CMG） | CMG 替代，代价低，物理动机强 | 待后续 |
+| 后续 | 想法 H（频域） | 较复杂但差异化显著 | 待后续 |
+| 后续 | 想法 I（类别感知） | 创新性强但工程复杂 | 待后续 |
