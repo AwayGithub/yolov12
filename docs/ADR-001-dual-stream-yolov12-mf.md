@@ -209,21 +209,23 @@ def get_model(self, cfg=None, weights=None, verbose=True):
 | Exp-4d | 双分支 + CMG@P4P5 + 双向CMA@P4 | 0.931 | 0.623 | 0.923 | 0.887 | 4.47M | 16.68 | 完成 |
 | Exp-5 | RGB-only 3ch 单分支 | 0.907 | 0.583 | 0.920 | 0.854 | 2.51M | 4.08 | 完成 |
 | Exp-6 | IR-only 3ch 单分支 | 0.887 | 0.564 | 0.888 | 0.831 | 2.51M | 4.33 | 完成 |
-| **Exp-7a** ◆ | **DMGFusion@P2 + CMG@P4P5 + CMA@P5 + head P2P3P4P5** | — | — | — | — | ~5.53M | — | **训练中 (tmux0)** |
+| Exp-7a ⚠️ | DMGFusion@P2 + CMG@P4P5 + CMA@P5 + head P2P3P4P5 | — | — | — | — | ~5.53M | — | **已完成（差于7b，数值待补）** |
 | Exp-7b | Concat+1×1Conv@P2 + CMG@P4P5 + CMA@P5 + head P2P3P4P5 | — | — | — | — | ~5.52M | — | **训练中 (tmux1)** |
-| Exp-7c | DMGFusion@P2 + CMG@P4P5 + CMA@P5 + head P3P4P5（无P2检测） | — | — | — | — | ~5.53M | — | 待运行 |
-| Exp-7d | Concat+1×1Conv@P2 + CMG@P4P5 + CMA@P5 + head P3P4P5（无P2检测） | — | — | — | — | ~5.52M | — | 待运行 |
+| Exp-7c | DMGFusion@P2 + CMG@P4P5 + CMA@P5 + head P3P4P5（无P2检测） | — | — | — | — | ~5.53M | — | **待运行（关键诊断，见下）** |
+| Exp-7d | Concat+1×1Conv@P2 + CMG@P4P5 + CMA@P5 + head P3P4P5（无P2检测） | — | — | — | — | ~5.52M | — | **训练中 (tmux0)** |
 
-> ★ 当前最优候选。◆ Exp-7 主方案（DMGFusion@P2 差异引导融合，见想法 J）。GFLOPs 见下表（P4P5 组合因 thop 双流追踪问题偏低，以推理 ms 为准）。
+> ★ 当前最优候选。GFLOPs 见下表（P4P5 组合因 thop 双流追踪问题偏低，以推理 ms 为准）。
 >
 > **Exp-7 消融矩阵**（2×2 设计）：
 >
 > | | head P2P3P4P5 | head P3P4P5（无P2检测） |
 > |---|---|---|
-> | **DMGFusion@P2** | Exp-7a（主方案） | Exp-7c |
-> | **Concat+1×1Conv@P2** | Exp-7b | Exp-7d |
+> | **DMGFusion@P2** | Exp-7a ⚠️（已完成，差于7b） | Exp-7c（待运行，关键诊断） |
+> | **Concat+1×1Conv@P2** | Exp-7b（训练中） | Exp-7d（训练中） |
 >
-> 对比链：7a vs 7b → 融合方式的影响；7a vs 7c → P2检测头的贡献；7c vs Exp-4c → P2融合本身（无检测头）的影响。
+> 对比链：7a vs 7b → 融合方式的影响；7a vs 7c → P2检测头的贡献；**7c vs Exp-4c → DMGFusion 特征质量本身**（与检测头无关）。
+>
+> **⚠️ 异常观察（2026-04-17）：** Exp-7a（DMGFusion@P2）训练完成后差于 Exp-7b（Concat+Conv@P2），说明 DMGFusion 在 P2 产生了副作用。根本原因待 Exp-7c/7d 结果确认（见 §3.4 DMGFusion 诊断）。
 
 ### 3.2 参数量与计算量对比
 
@@ -245,6 +247,42 @@ def get_model(self, cfg=None, weights=None, verbose=True):
 - Exp-7b（plain P2 fusion）≈ Exp-4c + P2 head + Conv(2c,c,1)@P2 ≈ 5.23M + ~0.29M ≈ **~5.52M**
 - Exp-7a（DMGFusion@P2）≈ Exp-7b - Conv(2c,c,1) + DMGFusion ≈ 5.52M - ~1K + ~12K ≈ **~5.53M**
 - DMGFusion 额外开销极小（~12K params，~230 MFLOPs @ 120×160），主要增量来自 P2 检测分支本身
+
+### 3.4 DMGFusion@P2 副作用诊断（2026-04-17）
+
+**现象：** Exp-7a（DMGFusion@P2）训练完成后指标差于 Exp-7b（Concat+1×1Conv@P2），说明 DMGFusion 对 P2 融合产生了副作用。
+
+**关键问题：** 是 DMGFusion 特征质量本身的问题，还是 DMGFusion 特征与 P2 检测头的交互问题？
+
+**Exp-7c 是诊断关键**（必须运行）：
+- 若 **7c < Exp-4c**：DMGFusion 生成的 P2 特征本身有害，即使不用于检测也会通过 FPN top-down 路径污染 P3/P4/P5 → 模块设计存在根本问题，需要重新设计
+- 若 **7c ≈ Exp-4c**：DMGFusion 特征中性，问题出在 P2 检测头与 DMGFusion 的交互 → 可以考虑放弃 P2 检测头但保留 DMGFusion 作为特征增强
+- 若 **7c > Exp-4c**：DMGFusion 特征实际有益，P2 检测头本身（而非 DMGFusion）是问题 → 调整检测头
+
+**可能的失效原因（按可能性排序）：**
+
+1. **D = |RGB-IR| 在 P2 过于嘈杂**：P2 是最浅的融合点，C3k2 之后的特征仍是低层纹理特征而非语义特征。差异图 D 编码的是像素级纹理差异（不同相机的噪声、色温差异）而非语义不一致，sel_net 在学习噪声模式而非模态判别特征。
+
+2. **公式双重计数导致初始化偏置**：当 alpha=0、beta=1、w_rgb≈w_ir≈0.5 时：
+   ```
+   fused = (w_rgb·x_rgb + w_ir·x_ir) + 1.0 × 0.5·(x_rgb + x_ir)
+         ≈ 0.5·(x+y) + 0.5·(x+y) = (x_rgb + x_ir)   # 2× 均值！
+   ```
+   出发点并非"简单平均"而是"2倍均值"，out_proj 的 BN 虽然能归一化幅度，但梯度流通过两条路径（加权路径 + 残差路径）存在干扰。
+
+3. **alpha 过快增长**：alpha 从 0 开始但无约束，训练初期若梯度将 alpha 推向正值，`(1 + alpha·S)` 项会放大 P2 高差异区域的特征，可能破坏 BN 统计量，进而影响 FPN 上游。
+
+4. **P2 检测头梯度干扰主干**：4-scale 检测头在 P2 增加了大量检测梯度，这些梯度通过 FPN top-down 路径反传，可能影响 P3/P4/P5 的优化。（此原因与 DMGFusion 无关，7b 同样有 P2 头，7b > 7a 说明 DMGFusion 本身也有问题。）
+
+**诊断实验建议（等 7c/7d 结果后执行）：**
+
+| 诊断操作 | 目的 | 成本 |
+|----------|------|------|
+| 记录训练过程中 `alpha.item()` 和 `beta.item()` 曲线 | 确认 alpha 是否过快增长 | 零成本，加 logging callback |
+| 在 val 时可视化 W（模态选择权重）和 S（差异幅度门） | 确认 sel_net 是否在学习有意义的特征 | 低成本 |
+| 比较 7a vs 7b 在 P3/P4/P5 的特征分布（activation statistics） | 确认 P2 DMGFusion 是否污染了上层特征 | 中等成本 |
+| 尝试 DMGFusion-lite：去掉 beta 残差项，只用 `out_proj(w_rgb·x + w_ir·x)` | 验证双重计数假设（原因2） | 新实验 Exp-8a |
+| 冻结 alpha=0（纯软模态选择，无差异放大） | 隔离 alpha 放大效应（原因3） | 新实验 Exp-8b |
 
 ### 3.3 分类别详细结果
 
