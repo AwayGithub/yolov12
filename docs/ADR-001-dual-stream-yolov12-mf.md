@@ -216,6 +216,13 @@ def get_model(self, cfg=None, weights=None, verbose=True):
 
 > ★ 当前最优候选。GFLOPs 见下表（P4P5 组合因 thop 双流追踪问题偏低，以推理 ms 为准）。
 >
+> **训练日志目录对应关系：**
+> | 目录 | 实验 | tmux |
+> |------|------|------|
+> | `runs/detect/train` | Exp-7c | tmux2 |
+> | `runs/detect/train2` | Exp-7b | tmux1 |
+> | `runs/detect/train3` | Exp-7d | tmux0 |
+>
 > **Exp-7 消融矩阵**（2×2 设计）：
 >
 > | | head P2P3P4P5 | head P3P4P5（无P2检测） |
