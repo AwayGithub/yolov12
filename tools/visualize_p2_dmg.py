@@ -218,10 +218,9 @@ def parse_args():
 
 def main():
     args = parse_args()
-    out_dir = Path(args.out)
-    out_dir.mkdir(parents=True, exist_ok=True)
-
     stem = Path(args.rgb).stem
+    out_dir = Path(args.out) / stem
+    out_dir.mkdir(parents=True, exist_ok=True)
 
     # ── Load model ──────────────────────────────────────────────────────────
     from ultralytics import YOLO
