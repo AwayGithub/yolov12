@@ -124,34 +124,31 @@ def main():
     model = YOLO(args.ckpt)
 
     # ── Run validation with per-image tracking ──────────────────────────────
-    # We collect per-image stats via a callback on_val_batch_end.
     per_image = []  # list of dicts
 
-    # State shared between callback and main
+    # State shared between patched method and main
     _state = {"batch_stats": [], "batch_files": []}
 
-    def _on_batch_end(validator):
-        """Called after update_metrics has appended to validator.stats."""
-        n_new = len(validator.stats["tp"]) - len(_state["batch_stats"])
-        for i in range(n_new):
-            idx = len(_state["batch_stats"])
-            _state["batch_stats"].append({
-                "tp": validator.stats["tp"][idx],
-                "conf": validator.stats["conf"][idx],
-                "pred_cls": validator.stats["pred_cls"][idx],
-                "target_cls": validator.stats["target_cls"][idx],
-            })
-
-    # We also need image file paths — hook into update_metrics via a wrapper
+    # Monkey-patch update_metrics to capture per-image stats AND file paths
     _orig_update_metrics = DetectionValidator.update_metrics
 
     def _patched_update_metrics(self, preds, batch):
+        n_before = len(self.stats["tp"])
         _orig_update_metrics(self, preds, batch)
-        # batch["im_file"] has paths for each image in the batch
+        n_after = len(self.stats["tp"])
+        # Capture newly added per-image stats
+        for idx in range(n_before, n_after):
+            _state["batch_stats"].append({
+                "tp": self.stats["tp"][idx],
+                "conf": self.stats["conf"][idx],
+                "pred_cls": self.stats["pred_cls"][idx],
+                "target_cls": self.stats["target_cls"][idx],
+            })
+        # Capture image file paths
         if "im_file" in batch:
-            for f in batch["im_file"]:
-                if len(_state["batch_files"]) < len(self.stats["tp"]):
-                    _state["batch_files"].append(f)
+            im_files = batch["im_file"]
+            for si in range(n_after - n_before):
+                _state["batch_files"].append(im_files[si])
 
     DetectionValidator.update_metrics = _patched_update_metrics
 

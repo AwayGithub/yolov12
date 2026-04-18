@@ -1,22 +1,22 @@
 # Ultralytics AGPL-3.0 License - https://ultralytics.com/license
 """
-Visualize DMGFusion@P2 intermediate feature maps for modality fusion diagnosis.
+Visualize plain Concat+Conv1x1 P2 fusion intermediate feature maps.
+
+Counterpart to visualize_p2_dmg.py — for models using p2_fusion=plain
+(e.g. dual_MF_plainP2_ChWP4P5_CMAP5_P2345).
 
 Usage:
-    python tools/visualize_p2_dmg.py \\
-        --ckpt runs/detect/train_7a/weights/best.pt \\
-        --rgb  datasets/RGBT-3M/RGB/val/frame_0042.jpg \\
-        --ir   datasets/RGBT-3M/IR/val/frame_0042.jpg \\
-        --out  tools/vis_p2
+    python tools/visualize_p2_plain.py \
+        --ckpt runs/detect/RGBT-3M/dual_MF_plainP2_ChWP4P5_CMAP5_P2345/best.pt \
+        --rgb  datasets/RGBT-3M/RGB/val/video1_frame_01390.jpg \
+        --ir   datasets/RGBT-3M/IR/val/video1_frame_01390.jpg \
+        --out  tools/vis_p2_plain
 
-Outputs (in --out directory, named by image stem):
-    <stem>_mean.png              — 7-panel channel-mean overview
-    <stem>_ch_x_rgb_f1..f8.png  — all 64 channels of x_rgb, 8 channels per figure (2×4)
+Outputs (in --out/<stem> directory):
+    <stem>_mean.png              — 4-panel channel-mean overview (x_rgb, x_ir, D, fused)
+    <stem>_ch_x_rgb_f1..f8.png  — all 64 channels of x_rgb
     <stem>_ch_x_ir_f1..f8.png   — all 64 channels of x_ir
     <stem>_ch_D_f1..f8.png      — all 64 channels of D = |x_rgb - x_ir|
-    <stem>_ch_W_rgb.png          — W_rgb spatial weight map (single channel)
-    <stem>_ch_W_ir.png           — W_ir spatial weight map (single channel)
-    <stem>_ch_S_f1..f8.png      — all 64 channels of S (saliency)
     <stem>_ch_fused_f1..f8.png  — all 64 channels of fused output
 """
 
@@ -34,47 +34,45 @@ import torch
 # Hook registration
 # ---------------------------------------------------------------------------
 
-def _hook_dmgfusion(model):
-    """Register a forward hook on the first DMGFusion module found in *model*.
+def _hook_plain_fusion(model):
+    """Register a forward hook on the P2 fusion Conv (plain Concat+Conv1x1).
+
+    For DualStreamDetectionModel with p2_fusion=plain, the P2 fusion module is
+    a Conv(2C, C, 1, 1).  We hook into DualStreamDetectionModel._predict_once
+    to capture the P2 inputs before concat and the fused output.
 
     Args:
         model: nn.Module (the inner model, e.g. YOLO().model).
 
     Returns:
         dict that will be populated with keys
-        {x_rgb, x_ir, D, W, S, fused} after the next forward pass.
+        {x_rgb, x_ir, fused} after the next forward pass.
     """
-    from ultralytics.nn.modules.block import DMGFusion
+    from ultralytics.nn.tasks import DualStreamDetectionModel
+
+    if not isinstance(model, DualStreamDetectionModel):
+        raise RuntimeError("Model is not a DualStreamDetectionModel. "
+                           "Is the checkpoint from a dual-stream experiment?")
+
+    # The P2 fusion conv is model.fusion_convs["p2"]
+    p2_conv = model.fusion_convs.get("p2")
+    if p2_conv is None:
+        raise RuntimeError("No P2 fusion conv found in model.fusion_convs.")
 
     captured = {}
 
     def _fwd(module, inp, out):
-        x_rgb_in = inp[0].detach().cpu()
-        x_ir_in  = inp[1].detach().cpu()
-        D_raw    = torch.abs(x_rgb_in - x_ir_in)
-
-        dev = next(module.parameters()).device
-        with torch.no_grad():
-            stacked    = torch.cat([x_rgb_in, x_ir_in, D_raw], dim=1).to(dev)
-            sel_logits = module.sel(stacked).cpu()
-            W          = torch.softmax(sel_logits, dim=1)
-            S          = torch.sigmoid(module.diff_enc(D_raw.to(dev))).cpu()
-
-        captured["x_rgb"] = x_rgb_in
-        captured["x_ir"]  = x_ir_in
-        captured["D"]     = D_raw
-        captured["W"]     = W
-        captured["S"]     = S
+        # inp[0] is the concatenated tensor (B, 2C, H, W)
+        x_cat = inp[0].detach().cpu()
+        C = x_cat.shape[1] // 2
+        captured["x_rgb"] = x_cat[:, :C]   # first half = rgb (see tasks.py line 571)
+        captured["x_ir"] = x_cat[:, C:]    # second half = ir
         captured["fused"] = out.detach().cpu()
 
-    for m in model.modules():
-        if isinstance(m, DMGFusion):
-            m.register_forward_hook(_fwd)
-            print(f"[hook] Registered on {type(m).__name__} — channels={m.out_proj.conv.in_channels}")
-            print(f"[params] alpha={m.alpha.item():.6f}, beta={m.beta.item():.6f}")
-            return captured
-
-    raise RuntimeError("No DMGFusion module found in model. Is the checkpoint from a DMGFusion experiment?")
+    p2_conv.register_forward_hook(_fwd)
+    print(f"[hook] Registered on P2 fusion Conv — in_channels={p2_conv.conv.in_channels}, "
+          f"out_channels={p2_conv.conv.out_channels}")
+    return captured
 
 
 # ---------------------------------------------------------------------------
@@ -104,18 +102,17 @@ def _chan_mean(t: torch.Tensor) -> np.ndarray:
 
 
 def _plot_mean_overview(tensors: dict, title: str, out_path: Path) -> None:
-    """7-panel channel-mean overview figure."""
-    keys    = ["x_rgb", "x_ir", "D", "W_rgb", "W_ir", "S", "fused"]
-    labels  = ["x_rgb (mean)", "x_ir (mean)", "D=|R-I| (mean)",
-               "W_rgb", "W_ir", "S saliency (mean)", "fused (mean)"]
-    cmaps   = ["viridis", "viridis", "inferno", "RdBu_r", "RdBu_r", "inferno", "viridis"]
+    """4-panel channel-mean overview figure."""
+    keys = ["x_rgb", "x_ir", "D", "fused"]
+    labels = ["x_rgb (mean)", "x_ir (mean)", "D=|R-I| (mean)", "fused (mean)"]
+    cmaps = ["viridis", "viridis", "inferno", "viridis"]
 
-    fig, axes = plt.subplots(1, 7, figsize=(24, 3.8))
+    fig, axes = plt.subplots(1, 4, figsize=(16, 3.8))
     fig.suptitle(title, fontsize=9)
 
     for ax, k, lbl, cmap in zip(axes, keys, labels, cmaps):
         arr = _chan_mean(tensors[k])
-        im  = ax.imshow(arr, cmap=cmap)
+        im = ax.imshow(arr, cmap=cmap)
         ax.set_title(lbl, fontsize=7.5)
         ax.axis("off")
         plt.colorbar(im, ax=ax, fraction=0.046, pad=0.02)
@@ -128,30 +125,17 @@ def _plot_mean_overview(tensors: dict, title: str, out_path: Path) -> None:
 
 _ROWS_PER_FIG = 2
 _COLS_PER_FIG = 4
-_CH_PER_FIG   = _ROWS_PER_FIG * _COLS_PER_FIG  # 8 channels per figure
+_CH_PER_FIG = _ROWS_PER_FIG * _COLS_PER_FIG  # 8 channels per figure
 
 
 def _plot_per_channel(t: torch.Tensor, key: str,
                       title_prefix: str, out_dir: Path, stem: str,
                       cmap: str = "viridis") -> None:
-    """Save all channels as paginated 2×4 figures (8 channels each).
-
-    For a C=64 tensor this produces f1..f8 files.
-    Single-channel tensors (W_rgb, W_ir) produce one file with no page suffix.
-
-    Args:
-        t:            Tensor (B, C, H, W).
-        key:          Variable name, used in title and filename.
-        title_prefix: e.g. "frame_0042 | DMGFusion@P2".
-        out_dir:      Directory to write files into.
-        stem:         Image filename stem, e.g. "frame_0042".
-        cmap:         Matplotlib colormap name.
-    """
+    """Save all channels as paginated 2×4 figures (8 channels each)."""
     arr = t[0].numpy().astype(np.float32)  # (C, H, W)
-    C   = arr.shape[0]
+    C = arr.shape[0]
 
     if C == 1:
-        # Single-channel (W_rgb, W_ir): one plain figure
         fig, ax = plt.subplots(1, 1, figsize=(4, 3.2))
         fig.suptitle(f"{title_prefix} — {key}", fontsize=8)
         im = ax.imshow(arr[0], cmap=cmap)
@@ -165,11 +149,10 @@ def _plot_per_channel(t: torch.Tensor, key: str,
         print(f"  [ch]    → {out_path}")
         return
 
-    # Multi-channel: paginate into 2×4 grids
     n_figs = math.ceil(C / _CH_PER_FIG)
     for fig_idx in range(n_figs):
         ch_start = fig_idx * _CH_PER_FIG
-        ch_end   = min(ch_start + _CH_PER_FIG, C)
+        ch_end = min(ch_start + _CH_PER_FIG, C)
         n_in_fig = ch_end - ch_start
 
         fig, axes = plt.subplots(_ROWS_PER_FIG, _COLS_PER_FIG,
@@ -183,8 +166,8 @@ def _plot_per_channel(t: torch.Tensor, key: str,
 
         for slot in range(_CH_PER_FIG):
             r, c = divmod(slot, _COLS_PER_FIG)
-            ax   = axes[r][c]
-            ch   = ch_start + slot
+            ax = axes[r][c]
+            ch = ch_start + slot
             if slot < n_in_fig:
                 im = ax.imshow(arr[ch], cmap=cmap)
                 ax.set_title(f"ch{ch}", fontsize=7)
@@ -203,14 +186,14 @@ def _plot_per_channel(t: torch.Tensor, key: str,
 # ---------------------------------------------------------------------------
 
 def parse_args():
-    p = argparse.ArgumentParser(description="Visualize DMGFusion@P2 feature maps")
+    p = argparse.ArgumentParser(description="Visualize plain Concat+Conv1x1 P2 feature maps")
     p.add_argument("--ckpt", required=True,
-                   help="Path to YOLO checkpoint (.pt), e.g. runs/detect/train_7a/weights/best.pt")
-    p.add_argument("--rgb",  required=True,
+                   help="Path to YOLO checkpoint (.pt), e.g. runs/detect/.../best.pt")
+    p.add_argument("--rgb", required=True,
                    help="Path to RGB image file")
-    p.add_argument("--ir",   required=True,
+    p.add_argument("--ir", required=True,
                    help="Path to IR image file (must be spatially aligned with --rgb)")
-    p.add_argument("--out",  default="tools/vis_p2_dmg",
+    p.add_argument("--out", default="tools/vis_p2_plain",
                    help="Output directory (created if absent)")
     p.add_argument("--device", default="cpu",
                    help="Inference device, e.g. 'cpu', '0', 'cuda:0'. Default: cpu")
@@ -230,18 +213,18 @@ def main():
     inner_model = yolo.model
     inner_model.eval()
 
-    captured = _hook_dmgfusion(inner_model)
+    captured = _hook_plain_fusion(inner_model)
 
     # ── Build 6-channel input ────────────────────────────────────────────────
     rgb_np = _load_image(args.rgb)
-    ir_np  = _load_image(args.ir)
+    ir_np = _load_image(args.ir)
 
     # Resize IR to match RGB if shapes differ
     if rgb_np.shape != ir_np.shape:
         ir_np = cv2.resize(ir_np, (rgb_np.shape[1], rgb_np.shape[0]))
 
     rgb_t = _to_tensor(rgb_np)
-    ir_t  = _to_tensor(ir_np)
+    ir_t = _to_tensor(ir_np)
     # Model convention (from Format bgr=0.0 channel flip + _predict_once split):
     #   0:3 = IR (BGR order),  3:6 = RGB (BGR order)
     # _to_tensor produces RGB order, so flip each to BGR before concat.
@@ -256,20 +239,24 @@ def main():
         inner_model(x6.to(dev))
 
     if not captured:
-        raise RuntimeError("Hook did not fire — check that the model uses DMGFusion.")
+        raise RuntimeError("Hook did not fire — check that the model uses plain P2 fusion.")
 
-    # ── Build tensors dict (expand W from 2ch to two 1ch tensors) ────────────
+    # ── Build tensors dict ──────────────────────────────────────────────────
+    # Note: for plain fusion, the concat order in tasks.py line 571 is
+    #   fc(torch.cat([r, i], dim=1))  where r=feats_rgb, i=feats_ir
+    # So the hook captures x_rgb = first half, x_ir = second half.
+    # However, we need to verify this matches the actual concat order.
+    # In tasks.py: r, i = feats_rgb[stage_name], feats_ir[stage_name]
+    # then fc(torch.cat([r, i], dim=1)) → first C channels = rgb, next C = ir ✓
+
     tensors = {
         "x_rgb": captured["x_rgb"],
-        "x_ir":  captured["x_ir"],
-        "D":     captured["D"],
-        "W_rgb": captured["W"][:, 0:1],   # (B,1,H,W) — spatial weight map
-        "W_ir":  captured["W"][:, 1:2],
-        "S":     captured["S"],
+        "x_ir": captured["x_ir"],
+        "D": torch.abs(captured["x_rgb"] - captured["x_ir"]),
         "fused": captured["fused"],
     }
 
-    title_base = f"{stem} | DMGFusion@P2"
+    title_base = f"{stem} | Plain Concat+Conv1x1@P2"
 
     # ── 1. Channel-mean overview ─────────────────────────────────────────────
     _plot_mean_overview(tensors, title_base, out_dir / f"{stem}_mean.png")
@@ -277,11 +264,8 @@ def main():
     # ── 2. Per-channel grids ─────────────────────────────────────────────────
     ch_cfg = [
         ("x_rgb", "viridis"),
-        ("x_ir",  "viridis"),
-        ("D",     "inferno"),
-        ("W_rgb", "RdBu_r"),
-        ("W_ir",  "RdBu_r"),
-        ("S",     "inferno"),
+        ("x_ir", "viridis"),
+        ("D", "inferno"),
         ("fused", "viridis"),
     ]
     for key, cmap in ch_cfg:
