@@ -71,6 +71,7 @@ def _hook_dmgfusion(model):
         if isinstance(m, DMGFusion):
             m.register_forward_hook(_fwd)
             print(f"[hook] Registered on {type(m).__name__} — channels={m.out_proj.conv.in_channels}")
+            print(f"[params] alpha={m.alpha.item():.6f}, beta={m.beta.item():.6f}")
             return captured
 
     raise RuntimeError("No DMGFusion module found in model. Is the checkpoint from a DMGFusion experiment?")
