@@ -147,11 +147,31 @@ def main():
         col_mean = t.mean(dim=1)        # (C, W)
         row_std = row_mean.std(dim=1)   # per-channel variation across rows
         col_std = col_mean.std(dim=1)   # per-channel variation across cols
-        print(f"{name}: row-std/col-std ratio (first 8 DFL ch):")
-        for c in ch_ids[:8]:
-            r, cc = row_std[c].item(), col_std[c].item()
-            ratio = r / max(cc, 1e-9)
-            print(f"  ch{c:>2}: row_std={r:.4f}  col_std={cc:.4f}  ratio={ratio:.2f}")
+        ratios = (row_std / col_std.clamp(min=1e-9))
+
+        # Channel group labels for DFL/cls
+        def _label(c):
+            if c < 4 * reg_max:
+                side = ["left", "top", "right", "bot"][c // reg_max]
+                bin_ = c % reg_max
+                return f"DFL-{side}[b{bin_:02d}]"
+            return f"cls[{c - 4 * reg_max}]"
+
+        print(f"\n{name}: per-channel row_std / col_std ratio  (all {C} channels)")
+        print(f"  {'ch':>3}  {'row_std':>8}  {'col_std':>8}  {'ratio':>6}  label")
+        for c in range(C):
+            r = row_std[c].item()
+            cc = col_std[c].item()
+            ra = ratios[c].item()
+            flag = " *" if ra >= 2.0 else ""
+            print(f"  {c:>3}  {r:>8.4f}  {cc:>8.4f}  {ra:>6.2f}  {_label(c)}{flag}")
+
+        # Aggregate summary
+        med = ratios.median().item()
+        mean = ratios.mean().item()
+        frac_horiz = (ratios >= 2.0).float().mean().item()
+        print(f"  summary: mean={mean:.2f}  median={med:.2f}  "
+              f"fraction(ratio>=2)={frac_horiz*100:.1f}%")
 
     print(f"\nSaved visualizations to {out_dir}")
 
