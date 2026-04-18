@@ -10,8 +10,8 @@ Captures:
 Usage:
     python tools/visualize_p2_dmg.py \\
         --ckpt runs/detect/.../best.pt \\
-        --rgb  datasets/RGBT-3M/RGB/val/video10_frame_01154.jpg \\
-        --ir   datasets/RGBT-3M/IR/val/video10_frame_01154.jpg \\
+        --rgb  RGBT-3M/RGB/val/video10_frame_01154.jpg \\
+        --ir   RGBT-3M/IR/val/video10_frame_01154.jpg \\
         --out  tools/vis_dmg
 
 Output layout (under --out/<image_stem>/):
@@ -296,7 +296,7 @@ def parse_args():
                    help="Path to checkpoint (.pt)")
     p.add_argument("--frame",     required=True,
                    help="Frame relative path, e.g. val/video10_frame_01154.jpg")
-    p.add_argument("--data-root", default="datasets/RGBT-3M",
+    p.add_argument("--data-root", default="RGBT-3M",
                    help="Dataset root containing RGB/ and IR/ subdirs")
     p.add_argument("--out",       default="tools/vis_dmg", help="Output root directory")
     p.add_argument("--device",    default="cpu",  help="Inference device ('cpu', '0', 'cuda:0')")
