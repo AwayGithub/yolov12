@@ -55,13 +55,13 @@ def _hook_plain_fusion(model):
                            "Is the checkpoint from a dual-stream experiment?")
 
     # The P2 fusion conv is model.fusion_convs["p2"]
-    p2_conv = model.fusion_convs.get("p2")
-    if p2_conv is None:
+    if "p2" not in model.fusion_convs:
         raise RuntimeError("No P2 fusion conv found in model.fusion_convs.")
+    p2_conv = model.fusion_convs["p2"]
 
     captured = {}
 
-    def _fwd(module, inp, out):
+    def _fwd(_module, inp, out):
         # inp[0] is the concatenated tensor (B, 2C, H, W)
         x_cat = inp[0].detach().cpu()
         C = x_cat.shape[1] // 2
