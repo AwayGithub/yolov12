@@ -242,7 +242,10 @@ def main():
 
     rgb_t = _to_tensor(rgb_np)
     ir_t  = _to_tensor(ir_np)
-    x6    = torch.cat([rgb_t, ir_t], dim=1)  # (1, 6, H, W)
+    # Model convention (from Format bgr=0.0 channel flip + _predict_once split):
+    #   0:3 = IR (BGR order),  3:6 = RGB (BGR order)
+    # _to_tensor produces RGB order, so flip each to BGR before concat.
+    x6 = torch.cat([ir_t.flip(1), rgb_t.flip(1)], dim=1)  # (1, 6, H, W)
 
     dev = torch.device(args.device if args.device != "cpu" else "cpu")
     if args.device != "cpu":
