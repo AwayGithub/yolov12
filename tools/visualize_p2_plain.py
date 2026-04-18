@@ -78,6 +78,45 @@ def _draw_boxes(img_rgb: np.ndarray, dets: np.ndarray, names: dict) -> np.ndarra
     return img
 
 
+_GT_COLORS = [(255, 255, 255), (180, 255, 180), (255, 180, 180),
+              (180, 180, 255), (255, 255, 180), (180, 255, 255)]
+
+
+def _load_gt_labels(label_path: Path, img_h: int, img_w: int) -> np.ndarray:
+    """Load YOLO-format label file → (N, 6) float32 [x1, y1, x2, y2, 1.0, cls]."""
+    if not label_path.exists():
+        print(f"  [warn] label not found: {label_path}")
+        return np.zeros((0, 6), dtype=np.float32)
+    boxes = []
+    with open(label_path) as f:
+        for line in f:
+            parts = line.strip().split()
+            if len(parts) < 5:
+                continue
+            cls = int(parts[0])
+            cx, cy, w, h = map(float, parts[1:5])
+            x1, y1 = (cx - w / 2) * img_w, (cy - h / 2) * img_h
+            x2, y2 = (cx + w / 2) * img_w, (cy + h / 2) * img_h
+            boxes.append([x1, y1, x2, y2, 1.0, cls])
+    return np.array(boxes, dtype=np.float32) if boxes else np.zeros((0, 6), dtype=np.float32)
+
+
+def _draw_gt_boxes(img_rgb: np.ndarray, gts: np.ndarray, names: dict) -> np.ndarray:
+    """Draw GT boxes with white/light border and 'GT:' label prefix."""
+    img = img_rgb.copy()
+    for x1, y1, x2, y2, _, cls in gts:
+        c = int(cls)
+        col = _GT_COLORS[c % len(_GT_COLORS)]
+        cv2.rectangle(img, (int(x1), int(y1)), (int(x2), int(y2)), col, 2)
+        label = f"GT:{names.get(c, str(c))}"
+        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+        cv2.rectangle(img, (int(x1), int(y1) - th - 4),
+                      (int(x1) + tw + 2, int(y1)), col, -1)
+        cv2.putText(img, label, (int(x1) + 1, int(y1) - 3),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
+    return img
+
+
 def _stride_to_level(s: float) -> str:
     return {4: "p2", 8: "p3", 16: "p4", 32: "p5"}.get(int(s), f"s{int(s)}")
 
@@ -312,11 +351,19 @@ def main():
 
     names = getattr(model, "names", {i: str(i) for i in range(10)})
 
+    # ── Load GT labels ───────────────────────────────────────────────────────
+    label_path = data_root / "labels" / frame.parent / (frame.stem + ".txt")
+    h, w = rgb_np.shape[:2]
+    gts = _load_gt_labels(label_path, h, w)
+    print(f"[gt]   {len(gts)} ground-truth boxes from {label_path}")
+
     # ── Save input images & overlays ─────────────────────────────────────────
     _save_rgb(out_root / "inputs" / "rgb.png",      rgb_np)
     _save_rgb(out_root / "inputs" / "ir.png",       ir_np)
     _save_rgb(out_root / "inputs" / "rgb_pred.png", _draw_boxes(rgb_np, dets, names))
     _save_rgb(out_root / "inputs" / "ir_pred.png",  _draw_boxes(ir_np,  dets, names))
+    _save_rgb(out_root / "inputs" / "rgb_gt.png",   _draw_gt_boxes(rgb_np, gts, names))
+    _save_rgb(out_root / "inputs" / "ir_gt.png",    _draw_gt_boxes(ir_np,  gts, names))
     print(f"[save] inputs → {out_root / 'inputs'}")
 
     # ── Save fusion features per stage ───────────────────────────────────────
