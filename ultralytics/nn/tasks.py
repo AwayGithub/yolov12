@@ -68,6 +68,7 @@ from ultralytics.nn.modules import (
     CrossModalGating,
     CrossModalA2C2f,
     DMGFusion,
+    DMGFusionV2,
 )
 from ultralytics.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, colorstr, emojis, yaml_load
 from ultralytics.utils.checks import check_requirements, check_suffix, check_yaml
@@ -528,6 +529,8 @@ class DualStreamDetectionModel(DetectionModel):
             c_out = self._get_layer_out_channels(self.backbone_rgb[layer_idx])
             if stage_name == "p2" and _p2_fusion_mode == "dmg":
                 self.fusion_convs[stage_name] = DMGFusion(c_out)
+            elif stage_name == "p2" and _p2_fusion_mode == "dmg_v2":
+                self.fusion_convs[stage_name] = DMGFusionV2(c_out)
             else:
                 self.fusion_convs[stage_name] = Conv(c_out * 2, c_out, 1, 1)
 
@@ -646,7 +649,7 @@ class DualStreamDetectionModel(DetectionModel):
         for stage_name in self.FUSION_LAYER_INDICES:
             r, i = feats_rgb[stage_name], feats_ir[stage_name]
             fc = self.fusion_convs[stage_name]
-            fused[stage_name] = fc(r, i) if isinstance(fc, DMGFusion) else fc(torch.cat([r, i], dim=1))
+            fused[stage_name] = fc(r, i) if isinstance(fc, (DMGFusion, DMGFusionV2)) else fc(torch.cat([r, i], dim=1))
 
         # 构造 y 列表供 head 使用跳连索引
         y = [None] * (max(self.FUSION_LAYER_INDICES.values()) + 1)

@@ -61,6 +61,7 @@ from .block import (
     CrossModalGating,
     CrossModalA2C2f,
     DMGFusion,
+    DMGFusionV2,
 )
 from .conv import (
     CBAM,
@@ -167,4 +168,5 @@ __all__ = (
     "A2C2f",
     "CrossModalGating",
     "DMGFusion",
+    "DMGFusionV2",
 )
