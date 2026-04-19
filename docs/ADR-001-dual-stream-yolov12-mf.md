@@ -1,6 +1,6 @@
 # ADR-001: 双分支 YOLOv12-MF RGB-红外融合检测架构
 
-**Status:** Exp-7 全部完成。Exp-8 进行中（P4 C3k2 + RGB/IR 辅助头 + DMGFusion v2）。Exp-4c 仍为最优性价比方案。
+**Status:** Exp-7 全部完成。Exp-8a 训练中（服务器）、Exp-8b 训练中（本地）。Exp-4c 仍为最优性价比方案。
 **Date:** 2026-04-04
 **Updated:** 2026-04-19
 **Deciders:** 研究者本人
@@ -713,7 +713,7 @@ Exp-7 揭示 DMGFusion@P2 全面劣于 Concat@P2，但指标差异（0.006）远
 
 **验收**：零输入 probe 验证 P4 ratio≥2 通道比例从 29% 降到 < 5%；smoke mAP 不退化
 
-#### Step 3：DMGFusion v2【待实施】
+#### Step 3：DMGFusion v2【已实施 2026-04-19】
 
 **目的**：在 RGB 输入质量通过 Step 1 改善后，重建 P2 融合模块，使门控真正有效。
 
@@ -738,7 +738,7 @@ Exp-7 揭示 DMGFusion@P2 全面劣于 Concat@P2，但指标差异（0.006）远
 
 ### 6.3 实验计划
 
-#### Exp-8a：Step 1 + Step 2 基础验证
+#### Exp-8a：Step 1 + Step 2 基础验证【训练中，服务器，2026-04-19 启动】
 
 **配置**：`yolov12-dual-p2.yaml`（P4 C3k2）+ `p2_fusion: dmg`（保留 v1，暂不换 v2）+ `--aux_loss_weight 0.25`
 **对照**：Exp-7a（DMGFusion v1，无 aux head，A2C2f@P4）
@@ -749,7 +749,7 @@ Exp-7 揭示 DMGFusion@P2 全面劣于 Concat@P2，但指标差异（0.006）远
 3. RGB P3/P4 特征可视化：目标位置激活值高于草地背景（说明 aux head 约束生效）
 4. 整体 mAP50-95 ≥ Exp-7a（0.628）
 
-#### Exp-8b：Step 3（DMGFusion v2，在 8a 基础上）
+#### Exp-8b：Step 3（DMGFusion v2，在 8a 基础上）【训练中，本地，2026-04-19 启动】
 
 **配置**：Exp-8a 所有配置 + `p2_fusion: dmg_v2`
 **对照**：Exp-8a
