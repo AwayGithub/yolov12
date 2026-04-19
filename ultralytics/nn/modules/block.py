@@ -1576,3 +1576,78 @@ class DMGFusion(nn.Module):
         modal_selected = w_rgb * x_rgb + w_ir * x_ir                             # (B, C, H, W)
         fused = (1.0 + self.alpha * S) * modal_selected + self.beta * 0.5 * (x_rgb + x_ir)
         return self.out_proj(fused)
+
+
+class DMGFusionV2(nn.Module):
+    """DMGFusion v2: simplified Differential Modality-Guided Fusion (ADR-001 §6.2, Exp-8b).
+
+    Key improvements over v1:
+    - Removes β residual, S amplitude branch, and α parameter (cleaner formula)
+    - InstanceNorm on R/I before computing D (removes cross-modal scale bias)
+    - Two independent sigmoid gates instead of softmax (avoids zero-sum dual-low-hole)
+    - Factorized W = W_spatial ⊗ W_channel (per-channel modality preference via SE)
+    - out_proj uses GroupNorm(8) instead of BN (preserves feature amplitude)
+
+    Formula: fused = out_proj(w_rgb * x_rgb + w_ir * x_ir)
+    Init: all gate biases = 0 → sigmoid(0) = 0.5 → fused ≈ 0.5(R+I) at start.
+
+    Args:
+        channels (int): Channel count C of each input stream.
+        diff_hidden_ratio (float): Bottleneck ratio for spatial gate hidden dim. Default 0.25.
+    """
+
+    def __init__(self, channels: int, diff_hidden_ratio: float = 0.25):
+        """Initialise DMGFusionV2 with spatial and channel modality gates."""
+        super().__init__()
+        c_diff = max(8, int(channels * diff_hidden_ratio))  # spatial gate hidden dim
+        c_ch   = max(16, channels // 4)                     # channel gate hidden dim (~4K params)
+
+        self.inst_norm = nn.InstanceNorm2d(channels, affine=False)
+
+        # Spatial gate: [IN(R); IN(I); D] → (B, 2, H, W) — two independent sigmoid logits
+        self.sel_s = nn.Sequential(
+            Conv(channels * 3, c_diff, 1),
+            Conv(c_diff, c_diff, 3, g=c_diff),        # DWConv for local spatial context
+            nn.Conv2d(c_diff, 2, 1, bias=True),        # 2 independent logits
+        )
+
+        # Channel gate (SE-style): GAP([IN(R); IN(I)]) → (B, 2C, 1, 1) → (B, 2, C, 1, 1)
+        self.sel_c = nn.Sequential(
+            nn.Conv2d(channels * 2, c_ch, 1, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(c_ch, channels * 2, 1, bias=True),
+        )
+
+        # out_proj: Conv2d + GroupNorm(8) + SiLU — no BN to preserve amplitude scale
+        self.out_proj = nn.Sequential(
+            nn.Conv2d(channels, channels, 1, bias=False),
+            nn.GroupNorm(8, channels),
+            nn.SiLU(inplace=True),
+        )
+
+        # Conservative init: bias=0 → sigmoid=0.5 → fused starts as plain average
+        nn.init.zeros_(self.sel_s[-1].bias)
+        nn.init.zeros_(self.sel_c[-1].bias)
+
+    def forward(self, x_rgb, x_ir):
+        """Compute sigmoid-gated, channel-factorized fusion of RGB and IR P2 features."""
+        r_n = self.inst_norm(x_rgb)
+        i_n = self.inst_norm(x_ir)
+        D   = torch.abs(r_n - i_n)                                               # (B, C, H, W)
+
+        # Spatial gate
+        W_s    = torch.sigmoid(self.sel_s(torch.cat([r_n, i_n, D], dim=1)))      # (B, 2, H, W)
+        w_s_rgb = W_s[:, 0:1]                                                     # (B, 1, H, W)
+        w_s_ir  = W_s[:, 1:2]                                                     # (B, 1, H, W)
+
+        # Channel gate: global average pool → SE MLP → reshape to (B, 2, C, 1, 1)
+        gap  = torch.cat([r_n, i_n], dim=1).mean(dim=(2, 3), keepdim=True)       # (B, 2C, 1, 1)
+        W_c  = torch.sigmoid(self.sel_c(gap)).view(x_rgb.shape[0], 2, -1, 1, 1)  # (B, 2, C, 1, 1)
+        w_c_rgb = W_c[:, 0]                                                       # (B, C, 1, 1)
+        w_c_ir  = W_c[:, 1]                                                       # (B, C, 1, 1)
+
+        # Factorized weight: W_spatial ⊗ W_channel → (B, C, H, W)
+        w_rgb = w_s_rgb * w_c_rgb
+        w_ir  = w_s_ir  * w_c_ir
+
+        return self.out_proj(w_rgb * x_rgb + w_ir * x_ir)

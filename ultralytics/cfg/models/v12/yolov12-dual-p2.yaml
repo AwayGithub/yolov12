@@ -9,7 +9,7 @@ dual_stream: true
 
 cmg_stages: [p4, p5]   # Exp-4c: SE channel gating at P4, P5
 cma_stages: [p5]        # Exp-4c: bidirectional CMA at P5 only
-p2_fusion: dmg          # P2 fusion mode: dmg = DMGFusion, plain = Concat+Conv1x1
+p2_fusion: dmg_v2       # P2 fusion mode: dmg_v2 = DMGFusionV2, dmg = v1 (ablation), plain = Concat+Conv1x1
 
 scales:
   n: [0.50, 0.25, 1024]
