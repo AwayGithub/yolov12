@@ -40,6 +40,13 @@ def parse_args():
         help="从指定 checkpoint 继续训练，例如 runs/detect/train/weights/last.pt",
     )
     parser.add_argument(
+        "--aux_loss_weight",
+        type=float,
+        default=0.25,
+        metavar="W",
+        help="RGB/IR 辅助检测头损失权重（dual_stream 模式下生效，默认 0.25）",
+    )
+    parser.add_argument(
         "--grad_debug",
         action="store_true",
         help="打印前 N 个 step 的梯度范数，用于检查跨模态路径的梯度流",
@@ -135,6 +142,27 @@ if __name__ == "__main__":
         model = YOLO("yolov12-dual.yaml")  # 双分支中期融合，n scale
     else:
         model = YOLO("yolov12.yaml")       # 单分支（early fusion 或单模态）
+
+    # 在训练开始前把 aux_loss_weight 写入模型（init_criterion 懒初始化，此时 model.args 已就绪）
+    _aux_w = args.aux_loss_weight
+    def _set_aux_weight(trainer):
+        from ultralytics.nn.tasks import DualStreamDetectionModel
+        m = trainer.model
+        if hasattr(m, "module"):  # DDP
+            m = m.module
+        if isinstance(m, DualStreamDetectionModel):
+            m.aux_loss_weight = _aux_w
+
+    def _patch_loss_names(trainer):
+        from ultralytics.nn.tasks import DualStreamDetectionModel
+        m = trainer.model
+        if hasattr(m, "module"):
+            m = m.module
+        if isinstance(m, DualStreamDetectionModel):
+            trainer.loss_names = ("box_loss", "cls_loss", "dfl_loss", "aux_rgb", "aux_ir")
+
+    model.add_callback("on_train_start", _set_aux_weight)
+    model.add_callback("on_train_start", _patch_loss_names)
 
     if args.grad_debug:
         # 将参数附到 trainer 上，供 callback 读取

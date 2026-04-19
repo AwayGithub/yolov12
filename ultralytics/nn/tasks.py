@@ -393,6 +393,58 @@ class DetectionModel(BaseModel):
         return E2EDetectLoss(self) if getattr(self, "end2end", False) else v8DetectionLoss(self)
 
 
+class DualStreamDetectionLoss:
+    """Detection loss for DualStreamDetectionModel with RGB/IR auxiliary heads at P3.
+
+    Total loss = main_loss + aux_weight * (aux_rgb_loss + aux_ir_loss).
+    Aux predictions are stored on the model as _aux_rgb / _aux_ir during the training forward pass
+    and consumed (and cleared) here on each __call__.
+    """
+
+    def __init__(self, model, aux_weight=0.25):
+        self.aux_weight = aux_weight
+        self._model = model  # de-paralleled DualStreamDetectionModel
+        self.main_criterion = v8DetectionLoss(model)
+        # Minimal dummy wrappers so v8DetectionLoss can init from each aux Detect head.
+        # v8DetectionLoss reads: dummy.model[-1] (Detect), dummy.args (hyps), dummy.parameters()
+        self._aux_crit_rgb = v8DetectionLoss(
+            types.SimpleNamespace(
+                model=nn.ModuleList([model.aux_head_rgb]),
+                args=model.args,
+                parameters=model.aux_head_rgb.parameters,
+            )
+        )
+        self._aux_crit_ir = v8DetectionLoss(
+            types.SimpleNamespace(
+                model=nn.ModuleList([model.aux_head_ir]),
+                args=model.args,
+                parameters=model.aux_head_ir.parameters,
+            )
+        )
+
+    def __call__(self, preds, batch):
+        """Compute main detection loss plus weighted aux losses if training aux preds are available.
+
+        Returns loss_items with 5 elements: [box, cls, dfl, aux_rgb, aux_ir].
+        aux_rgb / aux_ir are zero when aux heads are inactive (eval mode or first forward).
+        """
+        main_loss, main_items = self.main_criterion(preds, batch)
+        aux_rgb_val = main_items.new_zeros(1)
+        aux_ir_val  = main_items.new_zeros(1)
+        if self._model._aux_rgb is not None:
+            a_rgb, a_rgb_items = self._aux_crit_rgb(self._model._aux_rgb, batch)
+            a_ir,  a_ir_items  = self._aux_crit_ir(self._model._aux_ir,  batch)
+            # a_rgb_items: [box, cls, dfl] per-image means — same scale as main_items
+            aux_rgb_val = a_rgb_items.sum().reshape(1).detach()
+            aux_ir_val  = a_ir_items.sum().reshape(1).detach()
+            main_loss = main_loss + self.aux_weight * (a_rgb + a_ir)
+            self._model._aux_rgb = None
+            self._model._aux_ir  = None
+        # 5-item tensor so trainer displays aux losses as separate columns
+        loss_items = torch.cat([main_items, aux_rgb_val, aux_ir_val])
+        return main_loss, loss_items
+
+
 class DualStreamDetectionModel(DetectionModel):
     """双分支 RGB-IR 中期融合检测模型（Option B，ADR-001）。
 
@@ -485,6 +537,19 @@ class DualStreamDetectionModel(DetectionModel):
         self.inplace = self.yaml.get("inplace", True)
         self.end2end = getattr(self.model[-1], "end2end", False)
 
+        # RGB/IR 辅助检测头（P3 单尺度，仅训练时启用）
+        # 必须在 stride 计算前初始化，因为 _predict_once 训练模式下会调用它们
+        c_p3 = self._get_layer_out_channels(self.backbone_rgb[self.FUSION_LAYER_INDICES["p3"]])
+        self.aux_head_rgb = Detect(nc=self.yaml["nc"], ch=[c_p3])
+        self.aux_head_ir  = Detect(nc=self.yaml["nc"], ch=[c_p3])
+        for _aux_h in (self.aux_head_rgb, self.aux_head_ir):
+            _aux_h.stride   = torch.tensor([8.0])  # P3 固定 stride=8
+            _aux_h.inplace  = self.inplace
+            _aux_h.bias_init()
+        self._aux_rgb = None   # 由 _predict_once 在训练时填充，由 DualStreamDetectionLoss 消费
+        self._aux_ir  = None
+        self.aux_loss_weight = 0.25  # 可由 train.py --aux_loss_weight 覆盖
+
         # 计算 stride（用 6 通道假输入触发 _predict_once）
         m = self.model[-1]
         if isinstance(m, Detect):
@@ -502,10 +567,18 @@ class DualStreamDetectionModel(DetectionModel):
         else:
             self.stride = torch.Tensor([32])
 
+        # stride 推断时模型处于 training 模式，会填充 _aux_rgb/ir，清零避免残留
+        self._aux_rgb = None
+        self._aux_ir  = None
+
         initialize_weights(self)
         if verbose:
             self.info()
             LOGGER.info("")
+
+    def init_criterion(self):
+        """Return DualStreamDetectionLoss with main + RGB/IR aux head losses."""
+        return DualStreamDetectionLoss(self, aux_weight=self.aux_loss_weight)
 
     @staticmethod
     def _get_layer_out_channels(layer):
@@ -554,6 +627,11 @@ class DualStreamDetectionModel(DetectionModel):
 
         # 双向 CMA：两分支同步运行，在 CMA 层互以对方输入为 KV
         feats_rgb, feats_ir = self._forward_both_backbones(x_rgb, x_ir)
+
+        # 辅助检测头（训练专用，pre-CMG 纯 backbone 特征，强制 RGB/IR 各自保留目标语义）
+        if self.training:
+            self._aux_rgb = self.aux_head_rgb([feats_rgb["p3"]])
+            self._aux_ir  = self.aux_head_ir([feats_ir["p3"]])
 
         # 跨模态门控（Exp-1 无 CMG，此循环为空）
         for stage_name in self._cmg_stages:
