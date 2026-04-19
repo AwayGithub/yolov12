@@ -373,109 +373,6 @@ class CrossModalA2C2f(nn.Module):
 
 ---
 
-#### 3.5.2 特征层面可视化诊断（2026-04-19，基于 tools/visualize_p2_dmg.py + tools/probe_const_input.py）
-
-分析样本：video10_frame_01154（包含 fire/person 目标，RGB 背景为草地/植被）
-
-##### A. RGB/IR 双支路的本质问题
-
-**A1. RGB 支路语义坍塌**
-
-- P2/P3：RGB 特征以草地/植被高频纹理为主，目标仅在轮廓层面可见，且激活值低于背景
-- P4：RGB 已退化为随机噪声图，目标信息基本消失
-- P5：RGB 只剩零散全局激活点，无定位能力
-- **根因**：联合训练中 detection loss 的梯度主要经由 IR 强信号路回传（IR 目标-背景对比度 10:1），RGB backbone 以最省力的方式拟合低级纹理统计量，缺乏任何来自 loss 的强制约束。
-
-**A2. IR 支路才是真正的检测器，但能量被 RGB 稀释**
-
-- IR 在 P2–P5 每个尺度均清晰定位 fire/person（目标-背景对比度 10:1 以上）
-- 一旦 concat + 1×1 Conv 融合，IR 的目标能量被数量相等的 RGB 通道"平均"掉
-- **根因**：plain fusion 的 1×1 Conv 初始权重各向同性，无"优先信任 IR"的先验
-
-**A3. IR 传感器伪影（过曝条带）未被抑制**
-
-- 图像左上角 IR 过曝条带（x_ir≈3.0）在 P2→P5 每层 fused 中均高亮
-- 其值高于真实目标（x_ir≈1.5），任何融合模块均未能识别并压制这个坏区
-- 该伪影在 DMGFusion 的 D=|R-I| 映射中最亮，被 sel_net 误识为"高价值分歧区"
-
-##### B. Area Attention 的结构性噪声（零输入 probe 证实，与数据无关）
-
-**B1. P4 水平条带（area=4，已修复）**
-
-- 零输入 probe：P4 mean row_std/col_std ratio = 2.29，29% 通道 ratio ≥ 2.0
-- 原因：AAttn 把 H 切成 4 条 strip，各 strip 内 token 数不同 → softmax 温度差异 → strip 间均值偏移
-- 该噪声与输入内容无关，属架构性缺陷；CMG@P4 作用于已污染的特征，起到放大而非修复的效果
-- **已在 Exp-8 中修复**：backbone P4 改为 C3k2（无 area 切分）
-
-**B2. P5 全局注意力下的静态先验偏置（area=1，非条带，是学到的位置先验）**
-
-- 零输入 probe：P5 mean ratio = 1.98，bot[b05] ratio = **9.26**（极端离群），cls[0] (smoke) ratio = 3.15
-- 原因：P5 area=1 即全局注意力，条带不来自 area 切分，而是 ABlock MLP 学到的训练集位置先验（烟雾偏上，人偏下）
-- 15×20 分辨率（300 tokens）下全局 softmax 退化为全局均值，MLP 的偏置项成为主要信号来源，这些偏置编码了数据集统计量
-- **该问题不需要修复**：P5 的位置先验是有语义意义的数据集先验（不是伪影），保留 A2C2f@P5
-
-**B3. 零填充"相框"效应（所有尺度共有）**
-
-- DFL 的 left/right bins 显示竖直带（W 轴 padding 引起），top/bot bins 显示水平带（H 轴 area 切分引起）
-- 两种各向异性在 head 输出中交叉污染所有 DFL 通道的分布
-
-##### C. DMGFusion 模块六项设计缺陷（完整版）
-
-**C1. β 残差旁路吞噬了门控 W（最致命）**
-
-- 初始 α=0, β=1 → `fused ≈ out_proj(0.5·(R+I))`，W/S/D 全部成为装饰品
-- RGB 草的能量以 β=1 权重无条件注入，与 W 指向 IR（W_ir>0.6）的结论完全矛盾
-- **可视化证据**：W 看起来合理（倾向 IR），但 fused 被 RGB 草主导，β 旁路绕过了 W
-
-**C2. D=|R−I| 编码的是尺度差，不是语义分歧**
-
-- x_rgb 峰值 ~1.8，x_ir 峰值 ~3.0，D 最亮区出现在 IR 过曝条带，而非 fire/person 目标
-- 未归一化的直接相减只反映两路动态范围的差异
-- **修复**：减法前对两路分别做 `InstanceNorm2d(affine=False)`，使 D 编码归一化后的语义差异
-
-**C3. softmax 双路权重与物理语义对立（零和问题）**
-
-- softmax 强制 w_rgb + w_ir ≡ 1（零和约束），只能回答"更信哪一路"，无法表达"两路都重要"
-- **可视化证据**：W_rgb 和 W_ir 在目标位置**同时**出现暗洞（~0.3–0.4），而背景处走极端（~0.97/0.03）
-- 物理上，目标区域两模态应同时高权重（fire 同时有 RGB 火焰色和 IR 热辐射）
-- **修复**：改为两路独立 sigmoid 门，允许同时输出高权重
-
-**C4. 输出幅值塌缩 5–10 倍**
-
-- 输入：x_rgb ~[0.25, 1.75]，x_ir ~[0, 3.0]；输出 fused ~[-0.6, 0.2]
-- out_proj 含 BN（强制零均值）+ 加权平均公式本身收缩幅度 → 下游 C3k2 拿到低 SNR 特征
-- **修复**：out_proj 中 BN 改为 GroupNorm(8)，保留幅值尺度
-
-**C5. S（差异幅度调制）饱和，失去空间选择性**
-
-- S 整图在 0.5–0.8 区间，不再是"目标显著图"；D 各处非零 → sigmoid(diff_enc(D)) 全图接近饱和
-- 即便 α 训练到非零，`(1+αS)` 也只是近似均匀放大，无区分能力
-- **修复**：去掉 S 和 α 分支，整体公式简化为 `fused = out_proj(w_rgb·R + w_ir·I)`
-
-**C6. 模态权重 W 只有空间维，没有通道维**
-
-- W shape = (B, 2, H, W)，所有 64 通道共享同一空间权重
-- 不同通道捕获不同语义（边缘/纹理/颜色/温度），需要不同的 RGB/IR 偏好
-- **修复**：因式分解 W = W_spatial(B,2,H,W) ⊗ W_channel(B,2,C,1,1)，加入 SE 式通道门
-
-##### D. 跨尺度/架构层面的全局问题
-
-**D1. CMG/CMA 作用于已经损坏的特征**
-
-- CMG@P4 基于 area attention 条带污染后的特征做门控，放大而非修复噪声（已修复，见 B1）
-- P5 CMA 在 15×20（300 tokens）分辨率做 cross-attention，spatial 信息密度极低，但 P5 全局先验有语义意义，保留
-
-**D2. 双流 backbone 无参数共享，无一致性约束**
-
-- RGB/IR backbone 完全独立训练，无机制确保两路在同一层产生"可对齐"的特征
-- 这是 W 在目标处出现"双低洞"的深层原因：两路特征各自漂移到不同子空间，导致 sel_net 无法有效区分
-
-**D3. head 67 通道无损失解耦**
-
-- DFL 64 + cls 3 共享同一份 feature，cls 的梯度反向污染 DFL 分布学习
-- P5 cls[0] (smoke) ratio=3.15 出现 y 坐标系统性 bias 即为佐证
-
----
 
 ## 四、关键发现
 
@@ -672,17 +569,11 @@ CM-CBAM 的 `torch.mean/max(dim=1)` 跨步内存访问使推理时间 +166%（18
 
 ## 六、Exp-8：双流架构全面修复方案（进行中）
 
-> 基于 §3.5.2 特征层面可视化诊断，设计三步修改方案，每步独立消融验证。
-
 ### 6.1 背景与动机
 
-Exp-7 揭示 DMGFusion@P2 全面劣于 Concat@P2，但指标差异（0.006）远未刻画问题的深度。通过可视化工具（tools/visualize_p2_dmg.py + tools/probe_const_input.py）对特征层面的细致诊断表明：
+Exp-7 揭示 DMGFusion@P2 全面劣于 Concat@P2（mAP 7a=0.628 vs 7b=0.634, Exp-7c=0.625 < Exp-4c=0.632），说明 DMGFusion 特征通过 FPN 污染了上层。需要从 backbone 输入质量、P2 融合模块、P4 架构噪声三个方向同步修复。
 
-1. **RGB 支路语义坍塌**是根本问题。RGB backbone 无直接 loss 约束，仅靠融合后的检测损失传递梯度——而 IR 提供了更强的梯度信号，RGB 逐渐退化为纹理特征提取器。DMGFusion 的门控（W_ir > 0.6）正确识别出"应该信 IR"，但 β 残差旁路把 RGB 草直接注入 fused，导致一个显而易见的问题（W 合理 → fused 却被 RGB 污染）。
-2. **P4 area=4 引入架构性水平条带**，零输入 probe 量化确认（P4 mean ratio=2.29），与数据无关。CMG@P4 在已污染的特征上进行门控，起放大作用。
-3. **DMGFusion 本身有六项设计缺陷**，见 §3.5.2-C。
-
-**修复策略：先修"输入质量"，再修"融合机制"，最后修"架构噪声"。** 每步单独消融，避免多变量叠加影响归因。
+> **注**：基于可视化的深度分析于 2026-04-19 发现可视化脚本自身有 RGB/IR 通道错配 bug，结论不可信，待脚本修复后重新分析。本节仅保留已实施方案的实施细节与 Exp-8a/8b 训练记录。
 
 ### 6.2 三步修改方案
 
@@ -717,18 +608,18 @@ Exp-7 揭示 DMGFusion@P2 全面劣于 Concat@P2，但指标差异（0.006）远
 
 **目的**：在 RGB 输入质量通过 Step 1 改善后，重建 P2 融合模块，使门控真正有效。
 
-**核心改动**（相对 DMGFusion v1）：
+**核心改动**（相对 DMGFusion v1，根因待重新分析后补充）：
 
-| 改动 | v1 | v2 | 根因 |
-|------|----|----|------|
-| β 残差 | β=1 初始，可学 | **彻底移除** | β 旁路绕过 W，吞噬门控效果 |
-| S/α 分支 | 保留 | **彻底移除** | S 整图饱和，α 冗余，简化公式 |
-| D 的归一化 | 原始 `\|R-I\|` | **InstanceNorm 前先归一化**：`D = \|IN(R)−IN(I)\|` | D 实为尺度差，非语义分歧 |
-| W 的门类型 | softmax（零和） | **两路独立 sigmoid** | 零和使目标处出现"双低洞" |
-| W 的维度 | (B, 2, H, W) | **因式分解 W_s⊗W_c**：(B,2,H,W)×(B,2,C,1,1) | 不同通道需不同模态偏好 |
-| out_proj 归一化 | BN（幅值塌缩） | **GroupNorm(8)** | BN 零均值强制引起幅值塌缩 |
-| 融合公式 | `(1+αS)·(w_r·R+w_i·I) + β·(R+I)/2` | `out_proj(w_r·R + w_i·I)` | 极简，干净 |
-| 初始行为 | β=1 主导 | logit=0 → sigmoid=0.5 → fused≈0.5(R+I) | 保守初始化，与 v1 等价出发点 |
+| 改动 | v1 | v2 |
+|------|----|----|
+| β 残差 | β=1 初始，可学 | **彻底移除** |
+| S/α 分支 | 保留 | **彻底移除** |
+| D 的归一化 | 原始 `\|R-I\|` | **InstanceNorm 前先归一化**：`D = \|IN(R)−IN(I)\|` |
+| W 的门类型 | softmax（零和） | **两路独立 sigmoid** |
+| W 的维度 | (B, 2, H, W) | **因式分解 W_s⊗W_c**：(B,2,H,W)×(B,2,C,1,1) |
+| out_proj 归一化 | BN | **GroupNorm(8)** |
+| 融合公式 | `(1+αS)·(w_r·R+w_i·I) + β·(R+I)/2` | `out_proj(w_r·R + w_i·I)` |
+| 初始行为 | β=1 主导 | logit=0 → sigmoid=0.5 → fused≈0.5(R+I) |
 
 **D 计算细节**：`IN(R)` 和 `IN(I)` 仅用于计算 D 和喂给 sel_block；加权求和时用原始 x_rgb/x_ir（保留 IR 绝对幅值）。
 
@@ -745,9 +636,8 @@ Exp-7 揭示 DMGFusion@P2 全面劣于 Concat@P2，但指标差异（0.006）远
 
 **验收标准**：
 1. loss 曲线：`box_loss / cls_loss / dfl_loss` 均稳定下降，aux_rgb 和 aux_ir 的 loss 也下降（说明 RGB/IR 各自学到了目标）
-2. 零输入 probe：P4 ratio≥2 通道比例 < 5%
-3. RGB P3/P4 特征可视化：目标位置激活值高于草地背景（说明 aux head 约束生效）
-4. 整体 mAP50-95 ≥ Exp-7a（0.628）
+2. 整体 mAP50-95 ≥ Exp-7a（0.628）
+3. 特征层面验收标准待可视化脚本修复并重新分析后补充
 
 #### Exp-8b：Step 3（DMGFusion v2，在 8a 基础上）【训练中，本地，2026-04-19 启动】
 
@@ -755,11 +645,8 @@ Exp-7 揭示 DMGFusion@P2 全面劣于 Concat@P2，但指标差异（0.006）远
 **对照**：Exp-8a
 
 **验收标准**：
-1. P2 fused 可视化：草纹理消失，fire/person 目标清晰可见
-2. W 在目标位置：`w_rgb > 0.3` 且 `w_ir > 0.3`（不再是"双低洞"）
-3. W 在草地背景：`w_rgb < 0.2`
-4. fused 幅值与 x_rgb/x_ir 同数量级（ColorBar 量级对比）
-5. fire mAP50-95 ≥ Exp-8a + 0.5%
+1. fire mAP50-95 ≥ Exp-8a + 0.5%
+2. 特征层面验收标准待可视化脚本修复并重新分析后补充
 
 #### Exp-8c（可选消融）：仅 Step 1 + Step 2，不换 DMGFusion v2
 
@@ -782,7 +669,7 @@ Exp-7 揭示 DMGFusion@P2 全面劣于 Concat@P2，但指标差异（0.006）远
 |------|---------|------|
 | Step 1 aux head | aux loss 不下降或主 head 退化 > 1% | 降 λ 到 0.1；若仍失败则仅 RGB aux（IR 不加） |
 | Step 2 P4 C3k2 | smoke mAP 退化 > 1% | 仅 neck P4 保留 A2C2f，backbone 换 C3k2 |
-| Step 3 DMGFusion v2 | W 全图压 RGB（w_rgb < 0.1） | RGB backbone 未从 Step1 中受益，需更强 λ 或更多 epoch |
+| Step 3 DMGFusion v2 | mAP 显著退化 | 回退到 DMGFusion v1 或 plain Concat+Conv1x1 |
 
 ---
 

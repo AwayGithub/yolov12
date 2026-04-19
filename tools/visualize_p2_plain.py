@@ -333,7 +333,11 @@ def main():
 
     rgb_t = _to_tensor(rgb_np)
     ir_t  = _to_tensor(ir_np)
-    x6 = torch.cat([ir_t.flip(1), rgb_t.flip(1)], dim=1)
+    # Training pipeline's _format_img does transpose+[::-1] on the concatenated
+    # 6ch HWC, reversing the full channel axis → final CHW is [I_R,I_G,I_B,R,G,B].
+    # Model expects ch0:3 = IR (RGB order), ch3:6 = RGB (RGB order).
+    # _load_image already does BGR→RGB, so no .flip(1) needed.
+    x6 = torch.cat([ir_t, rgb_t], dim=1)
 
     dev = torch.device(args.device if args.device != "cpu" else "cpu")
     if args.device != "cpu":
