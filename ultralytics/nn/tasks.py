@@ -552,6 +552,7 @@ class DualStreamDetectionModel(DetectionModel):
         self._aux_rgb = None   # 由 _predict_once 在训练时填充，由 DualStreamDetectionLoss 消费
         self._aux_ir  = None
         self.aux_loss_weight = 0.25  # 可由 train.py --aux_loss_weight 覆盖
+        self.use_aux_head = True     # 可由 train.py --disable_aux_head 关闭（跳过前向+损失）
 
         # 计算 stride（用 6 通道假输入触发 _predict_once）
         m = self.model[-1]
@@ -632,7 +633,7 @@ class DualStreamDetectionModel(DetectionModel):
         feats_rgb, feats_ir = self._forward_both_backbones(x_rgb, x_ir)
 
         # 辅助检测头（训练专用，pre-CMG 纯 backbone 特征，强制 RGB/IR 各自保留目标语义）
-        if self.training:
+        if self.training and self.use_aux_head:
             self._aux_rgb = self.aux_head_rgb([feats_rgb["p3"]])
             self._aux_ir  = self.aux_head_ir([feats_ir["p3"]])
 
