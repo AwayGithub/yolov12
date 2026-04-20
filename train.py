@@ -47,6 +47,11 @@ def parse_args():
         help="RGB/IR 辅助检测头损失权重（dual_stream 模式下生效，默认 0.25）",
     )
     parser.add_argument(
+        "--disable_aux_head",
+        action="store_true",
+        help="关闭 RGB/IR 辅助检测头（P3 aux head），跳过其前向与损失（默认启用）",
+    )
+    parser.add_argument(
         "--grad_debug",
         action="store_true",
         help="打印前 N 个 step 的梯度范数，用于检查跨模态路径的梯度流",
@@ -145,6 +150,7 @@ if __name__ == "__main__":
 
     # 在训练开始前把 aux_loss_weight 写入模型（init_criterion 懒初始化，此时 model.args 已就绪）
     _aux_w = args.aux_loss_weight
+    _use_aux = not args.disable_aux_head
     def _set_aux_weight(trainer):
         from ultralytics.nn.tasks import DualStreamDetectionModel
         m = trainer.model
@@ -152,6 +158,9 @@ if __name__ == "__main__":
             m = m.module
         if isinstance(m, DualStreamDetectionModel):
             m.aux_loss_weight = _aux_w
+            m.use_aux_head = _use_aux
+            if not _use_aux:
+                print("[aux-head] Disabled via --disable_aux_head: skipping RGB/IR P3 aux head forward & loss.")
 
     def _patch_loss_names(trainer):
         from ultralytics.nn.tasks import DualStreamDetectionModel
