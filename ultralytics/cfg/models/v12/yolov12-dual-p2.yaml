@@ -7,9 +7,9 @@ nc: 3           # smoke, fire, person
 ch: 6           # 6-channel dual-stream input
 dual_stream: true
 
-cmg_stages: [p4, p5]   # Exp-4c: SE channel gating at P4, P5
-cma_stages: [p5]        # Exp-4c: bidirectional CMA at P5 only
-p2_fusion: dmg_v2       # P2 fusion mode: dmg_v2 = DMGFusionV2, dmg = v1 (ablation), plain = Concat+Conv1x1
+cmg_stages: []   # Exp-4c: SE channel gating at P4, P5
+cma_stages: []        # Exp-4c: bidirectional CMA at P5 only
+p2_fusion: plain       # P2 fusion mode: dmg_v2 = DMGFusionV2, dmg = v1 (ablation), plain = Concat+Conv1x1
 
 scales:
   n: [0.50, 0.25, 1024]
