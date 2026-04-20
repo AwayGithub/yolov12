@@ -427,7 +427,9 @@ def main():
 
     rgb_t = _to_tensor(rgb_np)
     ir_t  = _to_tensor(ir_np)
-    x6 = torch.cat([ir_t.flip(1), rgb_t.flip(1)], dim=1)
+    # 训练 Format(bgr=0.0) 把 6 通道反转为 [IR_RGB, VIS_RGB]（见 augment.py:2751）
+    # _load_image 已做 BGR→RGB，这里直接 cat，不要再 .flip(1)
+    x6 = torch.cat([ir_t, rgb_t], dim=1)
 
     dev = torch.device(args.device if args.device != "cpu" else "cpu")
     if args.device != "cpu":
