@@ -1,29 +1,24 @@
 # Ultralytics AGPL-3.0 License - https://ultralytics.com/license
 """
-Visualize dual-stream DMGFusion model feature maps across all detection scales.
+Visualize dual-stream plain Concat+Conv1x1 fusion model features across all scales.
 
 Captures:
-  - Fusion inputs/outputs at every level (P2 DMGFusion intermediates D/W/S + P3/P4/P5 plain)
+  - Fusion inputs/outputs at every level (P2/P3/P4/P5, all plain Conv1x1)
   - Detection head inputs (post-neck features) for each scale
   - Input RGB/IR images and detection result overlays
 
 Usage:
-    python tools/visualize_p2_dmg.py \\
-        --ckpt runs/detect/.../best.pt \\
-        --rgb  RGBT-3M/RGB/val/video10_frame_01154.jpg \\
-        --ir   RGBT-3M/IR/val/video10_frame_01154.jpg \\
-        --out  tools/vis_dmg
+    python tools/visualize_plain.py \\
+        --ckpt runs/detect/RGBT-3M/dual_MF_plainP2_ChWP4P5_CMAP5_P2345/best.pt \\
+        --rgb  RGBT-3M/RGB/val/video1_frame_01390.jpg \\
+        --ir   RGBT-3M/IR/val/video1_frame_01390.jpg \\
+        --out  tools/vis_plain
 
 Output layout (under --out/<image_stem>/):
     inputs/
         rgb.png, ir.png                    raw input images
         rgb_pred.png, ir_pred.png          with detection overlays
-    fusion_p2/
-        overview_mean.png                  multi-panel channel-mean (x_rgb/x_ir/D/W/S/fused)
-        x_rgb_ch_f*.png, x_ir_ch_f*.png
-        D_ch_f*.png, W_rgb.png, W_ir.png
-        S_ch_f*.png, fused_ch_f*.png
-    fusion_p3/ fusion_p4/ fusion_p5/
+    fusion_p2/ fusion_p3/ fusion_p4/ fusion_p5/
         overview_mean.png                  3-panel (x_rgb / x_ir / fused)
         x_rgb_ch_f*.png, x_ir_ch_f*.png, fused_ch_f*.png
     head_p2/ head_p3/ head_p4/ head_p5/
@@ -42,7 +37,7 @@ import torch
 
 
 # ---------------------------------------------------------------------------
-# Shared image / tensor helpers
+# Image / tensor helpers
 # ---------------------------------------------------------------------------
 
 def _load_image(path: str) -> np.ndarray:
@@ -135,7 +130,6 @@ _CH_PER_FIG = _ROWS * _COLS
 
 
 def _plot_overview(panels: list, title: str, out_path: Path) -> None:
-    """Multi-panel channel-mean overview. panels: [(label, H×W array, cmap), ...]."""
     n = len(panels)
     fig, axes = plt.subplots(1, n, figsize=(n * 3.2, 3.8))
     if n == 1:
@@ -155,7 +149,6 @@ def _plot_overview(panels: list, title: str, out_path: Path) -> None:
 def _plot_per_channel(t: torch.Tensor, key: str,
                       title_prefix: str, out_dir: Path,
                       cmap: str = "viridis") -> None:
-    """Save all channels as paginated 2×4 grids. Single-channel tensors get one file."""
     arr = t[0].numpy().astype(np.float32)
     C = arr.shape[0]
 
@@ -204,13 +197,12 @@ def _plot_per_channel(t: torch.Tensor, key: str,
 # ---------------------------------------------------------------------------
 
 def _hook_fusions(model) -> tuple:
-    """Hook every fusion_conv in DualStreamDetectionModel.
+    """Hook every plain Conv1x1 fusion in DualStreamDetectionModel.
 
     Returns (captured_dict, hook_handles_list).
-    captured_dict: {stage: {x_rgb, x_ir, fused, [D, W, S for DMGFusion]}}
+    captured_dict: {stage: {x_rgb, x_ir, fused}}
     """
     from ultralytics.nn.tasks import DualStreamDetectionModel
-    from ultralytics.nn.modules.block import DMGFusion
 
     if not isinstance(model, DualStreamDetectionModel):
         raise RuntimeError("Not a DualStreamDetectionModel")
@@ -221,40 +213,19 @@ def _hook_fusions(model) -> tuple:
     for stage, mod in model.fusion_convs.items():
         captured[stage] = {}
 
-        if isinstance(mod, DMGFusion):
-            def _make_dmg_hook(s, m):
-                def _fwd(_mod, inp, out):
-                    xr = inp[0].detach().cpu()
-                    xi = inp[1].detach().cpu()
-                    D = torch.abs(xr - xi)
-                    dev = next(m.parameters()).device
-                    with torch.no_grad():
-                        W = torch.softmax(
-                            m.sel(torch.cat([xr, xi, D], dim=1).to(dev)), dim=1
-                        ).cpu()
-                        S = torch.sigmoid(m.diff_enc(D.to(dev))).cpu()
-                    captured[s].update(
-                        x_rgb=xr, x_ir=xi, D=D, W=W, S=S,
-                        fused=out.detach().cpu(),
-                    )
-                return _fwd
-            handles.append(mod.register_forward_hook(_make_dmg_hook(stage, mod)))
-            print(f"[hook] DMGFusion@{stage}  "
-                  f"in_ch={mod.out_proj.conv.in_channels}  "
-                  f"alpha={mod.alpha.item():.4f}  beta={mod.beta.item():.4f}")
+        def _make_hook(s):
+            def _fwd(_mod, inp, _out):
+                xc = inp[0].detach().cpu()
+                C = xc.shape[1] // 2
+                captured[s].update(
+                    x_rgb=xc[:, :C], x_ir=xc[:, C:],
+                    fused=_out.detach().cpu(),
+                )
+            return _fwd
 
-        else:
-            def _make_plain_hook(s):
-                def _fwd(_mod, inp, out):
-                    xc = inp[0].detach().cpu()
-                    C = xc.shape[1] // 2
-                    captured[s].update(
-                        x_rgb=xc[:, :C], x_ir=xc[:, C:],
-                        fused=out.detach().cpu(),
-                    )
-                return _fwd
-            handles.append(mod.register_forward_hook(_make_plain_hook(stage)))
-            print(f"[hook] plain Conv@{stage}")
+        handles.append(mod.register_forward_hook(_make_hook(stage)))
+        print(f"[hook] plain Conv@{stage}  "
+              f"in_ch={mod.conv.in_channels}  out_ch={mod.conv.out_channels}")
 
     return captured, handles
 
@@ -263,7 +234,6 @@ def _hook_detect(model) -> tuple:
     """Hook Detect module to capture its input feature list.
 
     Returns (captured_dict, hook_handle).
-    captured_dict: {feats: [tensor per scale], strides: [float]}
     """
     from ultralytics.nn.modules.head import Detect
 
@@ -271,7 +241,7 @@ def _hook_detect(model) -> tuple:
     for m in model.modules():
         if isinstance(m, Detect):
             def _fwd(_mod, inp, _out):
-                feats = inp[0]  # list of tensors, one per scale
+                feats = inp[0]
                 captured["feats"] = [t.detach().cpu() for t in feats]
                 captured["strides"] = _mod.stride.detach().cpu().tolist()
             handle = m.register_forward_hook(_fwd)
@@ -282,39 +252,25 @@ def _hook_detect(model) -> tuple:
 
 
 # ---------------------------------------------------------------------------
-# Save helpers per stage
+# Save helpers
 # ---------------------------------------------------------------------------
 
 def _save_fusion_stage(stage: str, cap: dict, stem: str, stage_dir: Path) -> None:
-    """Write overview + per-channel grids for one fusion stage."""
-    title = f"{stem} | fusion@{stage.upper()}"
+    title = f"{stem} | fusion@{stage.upper()} (plain Concat+Conv1x1)"
+    D = torch.abs(cap["x_rgb"] - cap["x_ir"])
 
-    # --- overview panels ---
     panels = [
         ("x_rgb (mean)", _chan_mean(cap["x_rgb"]), "viridis"),
         ("x_ir (mean)",  _chan_mean(cap["x_ir"]),  "viridis"),
+        ("D=|R-I| (mean)", _chan_mean(D),           "inferno"),
+        ("fused (mean)", _chan_mean(cap["fused"]),  "viridis"),
     ]
-    if "D" in cap:
-        panels.append(("D=|R-I| (mean)", _chan_mean(cap["D"]), "inferno"))
-    if "W" in cap:
-        panels.append(("W_rgb", cap["W"][0, 0].numpy(), "RdBu_r"))
-        panels.append(("W_ir",  cap["W"][0, 1].numpy(), "RdBu_r"))
-    if "S" in cap:
-        panels.append(("S (mean)", _chan_mean(cap["S"]), "inferno"))
-    panels.append(("fused (mean)", _chan_mean(cap["fused"]), "viridis"))
     _plot_overview(panels, title, stage_dir / "overview_mean.png")
 
-    # --- per-channel grids ---
-    _plot_per_channel(cap["x_rgb"], "x_rgb", title, stage_dir, "viridis")
-    _plot_per_channel(cap["x_ir"],  "x_ir",  title, stage_dir, "viridis")
-    if "D" in cap:
-        _plot_per_channel(cap["D"], "D", title, stage_dir, "inferno")
-    if "W" in cap:
-        _plot_per_channel(cap["W"][:, 0:1], "W_rgb", title, stage_dir, "RdBu_r")
-        _plot_per_channel(cap["W"][:, 1:2], "W_ir",  title, stage_dir, "RdBu_r")
-    if "S" in cap:
-        _plot_per_channel(cap["S"], "S", title, stage_dir, "inferno")
-    _plot_per_channel(cap["fused"], "fused", title, stage_dir, "viridis")
+    _plot_per_channel(cap["x_rgb"], "x_rgb",  title, stage_dir, "viridis")
+    _plot_per_channel(cap["x_ir"],  "x_ir",   title, stage_dir, "viridis")
+    _plot_per_channel(D,            "D",       title, stage_dir, "inferno")
+    _plot_per_channel(cap["fused"], "fused",   title, stage_dir, "viridis")
 
 
 def _save_head_scale(lvl: str, feat: torch.Tensor,
@@ -330,14 +286,15 @@ def _save_head_scale(lvl: str, feat: torch.Tensor,
 # ---------------------------------------------------------------------------
 
 def parse_args():
-    p = argparse.ArgumentParser(description="Visualize DMGFusion dual-stream model features")
+    p = argparse.ArgumentParser(
+        description="Visualize plain Concat+Conv1x1 dual-stream model features")
     p.add_argument("--ckpt",      required=True,
                    help="Path to checkpoint (.pt)")
     p.add_argument("--frame",     required=True,
                    help="Frame relative path, e.g. val/video10_frame_01154.jpg")
     p.add_argument("--data-root", default="RGBT-3M",
                    help="Dataset root containing RGB/ and IR/ subdirs")
-    p.add_argument("--out",       default="tools/vis_dmg", help="Output root directory")
+    p.add_argument("--out",       default="tools/vis_plain", help="Output root directory")
     p.add_argument("--device",    default="cpu",  help="Inference device ('cpu', '0', 'cuda:0')")
     p.add_argument("--conf",      type=float, default=0.25, help="NMS confidence threshold")
     p.add_argument("--iou",       type=float, default=0.45, help="NMS IoU threshold")
@@ -414,7 +371,7 @@ def main():
     # ── Save fusion features per stage ───────────────────────────────────────
     for stage, cap in fused_cap.items():
         if not cap:
-            print(f"[warn] No data captured for fusion@{stage} — skipped")
+            print(f"[warn] No data for fusion@{stage} — skipped")
             continue
         stage_dir = out_root / f"fusion_{stage}"
         stage_dir.mkdir(parents=True, exist_ok=True)
@@ -423,9 +380,7 @@ def main():
 
     # ── Save detection head inputs per scale ─────────────────────────────────
     if det_cap:
-        feats   = det_cap["feats"]
-        strides = det_cap["strides"]
-        for feat, s in zip(feats, strides):
+        for feat, s in zip(det_cap["feats"], det_cap["strides"]):
             lvl = _stride_to_level(s)
             head_dir = out_root / f"head_{lvl}"
             head_dir.mkdir(parents=True, exist_ok=True)
