@@ -51,7 +51,106 @@ Exp-4c 时代 CMG（SE 跨模态通道门）与 CMA（双向跨模态注意力 @
 
 ## 二、DMGFusion v1 @P2：结果与论证
 
-### 2.1 模块回顾
+### 2.1 设计动机
+
+P2（stride=4）是 RGB 和 IR 双分支在最高分辨率的首次相遇点。两模态在此的特征分布差异最大：IR 通道在热源处呈现尖锐高值，RGB 通道编码纹理/颜色边缘。简单的 Concat+1×1Conv（plain fusion）在这一层无模态偏好先验，1×1Conv 需要从随机初始化自行学习"信 IR 还是信 RGB"，在数据不均衡或 RGB 语义质量差时容易偏向 IR 主导。
+
+DMGFusion v1 的核心思路是**让模型显式感知两模态的逐像素分歧**，以分歧大小作为路由信号：
+
+- **分歧大的像素**（目标区域，如 fire/person 处 IR 热辐射与 RGB 颜色差距显著）→ 差异门控放大，引导模型更重视分歧信号强的模态；
+- **分歧小的像素**（均匀背景，两模态一致）→ 门控接近中性，退化为加权均值；
+- **可学标量 α、β** 提供全局调节自由度，且初始化为 α=0、β=1，使模块在训练早期等价为简单均值融合，训练稳定后再逐步激活差异调制。
+
+### 2.2 伪代码
+
+```
+输入: x_rgb (B, C, H, W), x_ir (B, C, H, W)
+参数: sel_net, diff_enc, alpha(标量,初始0), beta(标量,初始1), out_proj
+
+# 1. 计算模态分歧图
+D = |x_rgb - x_ir|                               # (B, C, H, W)
+
+# 2. 空间模态路由权重（softmax 零和约束）
+logits = sel_net(concat([x_rgb, x_ir, D], dim=C)) # (B, 2, H, W)
+[w_rgb, w_ir] = softmax(logits, dim=1)            # 和为 1
+
+# 3. 差异显著图
+S = sigmoid(diff_enc(D))                          # (B, C, H, W)，值域 (0,1)
+
+# 4. 模态加权融合 + 差异调制 + 均值残差
+modal_blend = w_rgb * x_rgb + w_ir * x_ir        # 空间路由结果
+fused = (1 + alpha * S) * modal_blend \
+      + beta * 0.5 * (x_rgb + x_ir)              # alpha,beta 可学
+
+# 5. 输出投影（BN 稳幅，无激活）
+return out_proj(fused)                            # (B, C, H, W)
+```
+
+**初始化语义：** α=0 → `(1+α·S)=1`，差异调制项消失；β=1 → fused ≈ `out_proj(0.5·(x_rgb+x_ir))`，退化为纯均值融合，训练起点无害。
+
+### 2.3 完整代码实现
+
+```python
+class DMGFusion(nn.Module):
+    """Differential Modality-Guided Fusion for P2 RGB-IR streams.
+
+    Computes a per-pixel modality selection map W from the concatenation of both
+    streams and their absolute difference D = |RGB - IR|. Regions of high
+    disagreement are amplified by a learnable differential gate alpha, which
+    starts at 0 (neutral) and grows only if the training signal warrants it.
+
+    Args:
+        channels (int): Channel count C of each input stream.
+        diff_hidden_ratio (float): Bottleneck ratio for the difference encoder.
+    """
+
+    def __init__(self, channels: int, diff_hidden_ratio: float = 0.25):
+        super().__init__()
+        c_diff = max(8, int(channels * diff_hidden_ratio))
+
+        # 模态路由：[R; I; D] -> (B, 2, H, W) softmax 权重
+        self.sel = nn.Sequential(
+            Conv(channels * 3, c_diff, 1),         # 1×1 跨通道混合
+            Conv(c_diff, c_diff, 3, g=c_diff),     # 3×3 DWConv 捕获局部空间上下文
+            nn.Conv2d(c_diff, 2, 1, bias=True),    # 2通道 logits: {w_rgb, w_ir}
+        )
+
+        # 差异显著编码：D -> (B, C, H, W) 显著图，值域 (0,1)
+        self.diff_enc = nn.Sequential(
+            Conv(channels, c_diff, 1),
+            nn.Conv2d(c_diff, channels, 1, bias=True),
+        )
+
+        # 可学全局标量：保守初始化使模块训练早期等价均值融合
+        self.alpha = nn.Parameter(torch.zeros(1))  # 差异调制增益，初始 0
+        self.beta  = nn.Parameter(torch.ones(1))   # 均值残差权重，初始 1
+
+        # 输出投影（含 BN 稳幅，不加激活）
+        self.out_proj = Conv(channels, channels, 1, act=False)
+
+    def forward(self, x_rgb, x_ir):
+        D = torch.abs(x_rgb - x_ir)                                             # (B, C, H, W)
+        W = torch.softmax(self.sel(torch.cat([x_rgb, x_ir, D], dim=1)), dim=1)  # (B, 2, H, W)
+        w_rgb, w_ir = W[:, 0:1], W[:, 1:2]                                      # (B, 1, H, W)
+        S = torch.sigmoid(self.diff_enc(D))                                      # (B, C, H, W)
+        modal_selected = w_rgb * x_rgb + w_ir * x_ir
+        fused = (1.0 + self.alpha * S) * modal_selected + self.beta * 0.5 * (x_rgb + x_ir)
+        return self.out_proj(fused)
+```
+
+**参数规模（C=64，diff_hidden_ratio=0.25，c_diff=16）：**
+
+| 子模块 | 参数量 |
+|--------|-------:|
+| sel（1×1 + DW3×3 + 1×1） | 3,072 + 144 + 34 ≈ 3,250 |
+| diff_enc（1×1 + 1×1） | 1,024 + 1,040 ≈ 2,064 |
+| alpha + beta | 2 |
+| out_proj（1×1 Conv + BN） | 4,096 + 128 ≈ 4,224 |
+| **合计** | **≈ 9,540** |
+
+参数量约 ~10K，相对主干可忽略（ADR-001 §4.3 实测 Exp-8d/8e/8f 参数差 <12K）。
+
+### 2.4 模块回顾（融合公式）
 
 ```
 D = |R - I|                                      # 模态分歧图
@@ -62,7 +161,7 @@ fused = (1 + α·S)·(w_r·R + w_i·I) + β·(R+I)/2   # α, β 可学标量
 
 初始 α=0、β=1（初始化等价 `out_proj(0.5·(R+I))`，无害）。
 
-### 2.2 三方消融（干净基线，单变量 = P2 融合）
+### 2.5 三方消融（干净基线，单变量 = P2 融合）
 
 所有三实验共享 P4 C3k2 + P3 aux + 无 CMG/CMA + 4-scale head。
 
@@ -74,7 +173,7 @@ fused = (1 + α·S)·(w_r·R + w_i·I) + β·(R+I)/2   # α, β 可学标量
 
 **单调排序 plain < v2 < v1**，间距均 >0.3% 判定阈值，fire/person 方向一致。DMG v1 相对 plain 独立增益 +0.005。
 
-### 2.3 机制证据：α/β 跨基线演化轨迹
+### 2.6 机制证据：α/β 跨基线演化轨迹
 
 同一个 DMG v1 公式在三种上游基线下的收敛标量：
 
@@ -96,7 +195,7 @@ fused ≈ (1 + 2.42·S)·(w_r·R + w_i·I) − 0.10·(R+I) + out_proj 偏置
 
 这是信号处理意义上经典的 **differential amplifier + common-mode rejection** 结构——分歧像素（目标）处强化加权和，同时扣除两模态共享的背景基线。
 
-### 2.4 论证汇总（四条独立证据）
+### 2.7 论证汇总（四条独立证据）
 
 | 证据 | 内容 | 强度 |
 |------|------|:---:|
