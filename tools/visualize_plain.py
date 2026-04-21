@@ -8,7 +8,7 @@ Captures:
   - Input RGB/IR images and detection result overlays
 
 Usage:
-    python tools/visualize_p2_plain.py \\
+    python tools/visualize_plain.py \\
         --ckpt runs/detect/RGBT-3M/dual_MF_plainP2_ChWP4P5_CMAP5_P2345/best.pt \\
         --rgb  RGBT-3M/RGB/val/video1_frame_01390.jpg \\
         --ir   RGBT-3M/IR/val/video1_frame_01390.jpg \\

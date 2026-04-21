@@ -13,7 +13,7 @@ Captures (specific to DMGFusionV2 @P2):
 P3/P4/P5 plain Concat+Conv fusions are captured unchanged.
 
 Usage:
-    python tools/visualize_p2_dmg_v2.py \\
+    python tools/visualize_dmg_v2.py \\
         --ckpt runs/detect/.../epoch201.pt \\
         --frame val/video10_frame_01154.jpg \\
         --data-root RGBT-3M \\

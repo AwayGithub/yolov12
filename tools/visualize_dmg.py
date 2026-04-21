@@ -8,7 +8,7 @@ Captures:
   - Input RGB/IR images and detection result overlays
 
 Usage:
-    python tools/visualize_p2_dmg.py \\
+    python tools/visualize_dmg.py \\
         --ckpt runs/detect/.../best.pt \\
         --rgb  RGBT-3M/RGB/val/video10_frame_01154.jpg \\
         --ir   RGBT-3M/IR/val/video10_frame_01154.jpg \\
