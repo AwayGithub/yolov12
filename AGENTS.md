@@ -4,6 +4,12 @@
 
 This is the YOLOv12 repository, an attention-centric real-time object detector built on Ultralytics. The project includes detection, classification, and instance segmentation models.
 
+## Branch Workflow
+
+- All future YOLOv12 project changes must be made on the `claude/magical-burnell` branch.
+- The user will review changes on this branch and manually push or merge them to `main`.
+- Do not make project edits directly on `main` unless the user explicitly overrides this instruction.
+
 ## Project Structure
 
 ```
