@@ -512,6 +512,7 @@ class DualStreamDetectionModel(DetectionModel):
         self._bidir_cma_stages = set(self.yaml.get("bidir_cma_stages", []))
         self._bidir_cma_modules = nn.ModuleDict()
         self._bidir_layer_to_stage = {}
+        _bidir_c_out = {}  # stage_name -> c2，供 fusion_convs 使用，避免替换后查询 Identity
         for stage_name in self._bidir_cma_stages:
             if stage_name in self._cma_stages:
                 raise ValueError(
@@ -528,6 +529,7 @@ class DualStreamDetectionModel(DetectionModel):
             n = len(old_layer.m)
             self._bidir_cma_modules[stage_name] = BidirCrossModalA2C2f(c1, c2, n=n, e=0.5)
             self._bidir_layer_to_stage[layer_idx] = stage_name
+            _bidir_c_out[stage_name] = c2
 
         # 共享 neck + head
         self.head = nn.Sequential(*list(full_model.children())[backbone_end:])
@@ -549,13 +551,28 @@ class DualStreamDetectionModel(DetectionModel):
         _p2_fusion_mode = self.yaml.get("p2_fusion", "plain")
         self.fusion_convs = nn.ModuleDict()
         for stage_name, layer_idx in self.FUSION_LAYER_INDICES.items():
-            c_out = self._get_layer_out_channels(self.backbone_rgb[layer_idx])
+            # bidir 层已缓存 c_out，避免查询后续被替换的 Identity
+            if stage_name in _bidir_c_out:
+                c_out = _bidir_c_out[stage_name]
+            else:
+                c_out = self._get_layer_out_channels(self.backbone_rgb[layer_idx])
             if stage_name == "p2" and _p2_fusion_mode == "dmg":
                 self.fusion_convs[stage_name] = DMGFusion(c_out)
             elif stage_name == "p2" and _p2_fusion_mode == "dmg_v2":
                 self.fusion_convs[stage_name] = DMGFusionV2(c_out)
             else:
                 self.fusion_convs[stage_name] = Conv(c_out * 2, c_out, 1, 1)
+
+        # 原 A2C2f 通道信息已全部提取完毕，替换为 Identity 消除死参数
+        # 保留 .i / .f 属性，forward 循环靠它们确定层索引和输入来源
+        for stage_name in self._bidir_cma_stages:
+            layer_idx = self.FUSION_LAYER_INDICES[stage_name]
+            for backbone in (self.backbone_rgb, self.backbone_ir):
+                old = backbone[layer_idx]
+                placeholder = nn.Identity()
+                placeholder.i = old.i
+                placeholder.f = old.f
+                backbone[layer_idx] = placeholder
 
         # 保留 self.model 引用（stride 计算 + 兼容 DetectionModel 方法）
         self.model = full_model

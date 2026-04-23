@@ -1553,6 +1553,7 @@ class BidirLinearCrossAttnBlock(nn.Module):
         # Joint QKV projection applied to the 2N-token sequence
         self.qkv = nn.Linear(channels, channels * 3, bias=False)
         self.out_proj = nn.Linear(channels, channels, bias=False)
+        self.attn_drop = nn.Dropout(p=0.1)
 
         # LayerNorm on the joint token sequence (sequence-level normalisation)
         self.norm = nn.LayerNorm(channels)
@@ -1592,8 +1593,8 @@ class BidirLinearCrossAttnBlock(nn.Module):
         denom = phi_Q @ phi_K.sum(dim=-2, keepdim=True).transpose(-2, -1)  # (B, nh, 2N, 1)
         out = (phi_Q @ KV) / (denom + 1e-6)                      # (B, nh, 2N, hd)
 
-        # Merge heads → project → restore spatial dims
-        out = self.out_proj(out.transpose(1, 2).reshape(B, 2 * N, C))  # (B, 2N, C)
+        # Merge heads → project → dropout → restore spatial dims
+        out = self.attn_drop(self.out_proj(out.transpose(1, 2).reshape(B, 2 * N, C)))  # (B, 2N, C)
         out_r = out[:, :N].permute(0, 2, 1).reshape(B, C, H, W)
         out_i = out[:, N:].permute(0, 2, 1).reshape(B, C, H, W)
 
