@@ -1,7 +1,7 @@
 # ADR-002: 极简双流基线 + DMGFusion@P2
 
-**Status:** 🔒 冻结。Exp-8d (mAP50-95=0.644) 为最终主方案。Exp-9 不执行。
-**Date:** 2026-04-20 / **Updated:** 2026-04-21
+**Status:** 🔒 Exp-8d (mAP50-95=0.644) 冻结为主方案；BidirLiCMA@P5 作为后续探索单独记录，不改变主结论。
+**Date:** 2026-04-20 / **Updated:** 2026-04-23
 **Related:** [ADR-001](ADR-001-dual-stream-yolov12-mf.md)（历史档案，含 Exp-0~Exp-8 全量数据与诊断）
 
 ---
@@ -240,3 +240,85 @@ fused ≈ (1 + 2.42 · S) ⊙ (w_r ⊙ R + w_i ⊙ I) − 0.10 · (R+I) + out_pr
 **不执行。** 基线 Exp-8d=0.644 + §2.4 四条证据已构成完整投稿工作，Exp-9 候选均为 +0.001~0.005 的边际改动，无颠覆性预期。若审稿人追问，§2.4 的 β 符号翻转即是"v1 已自发演化到物理合理上限"的答辩口径。
 
 **重启条件：** 审稿明确要求 v1-mini 级对照 / 算力空闲冲 0.650+ / 发现 α-β 训练曲线异常。详细候选方案（9a v1-mini、9b 空间稀疏 S、9c β 空间门、9d P2 aux、9e DMG 跨尺度）见 git 历史或 ADR-001 §8 遗留问题。
+
+---
+
+## 四、后续探索：BidirLiCMA@P5（2026-04-23）
+
+### 4.1 当前问题
+
+在 Exp-8d 冻结后，当前探索方向是将 P5 层级的原始 A2C2f 替换为 **BidirLinearCrossAttn / BidirCrossModalA2C2f**，即在最高语义层用 joint token 方式对 RGB/IR 做双向线性跨模态注意力。实验目标是验证：在 DMGFusion@P2 已经建立低层差分融合后，P5 是否还能通过全局跨模态语义交互带来额外增益。
+
+当前代码路径：
+
+- `ultralytics/nn/modules/block.py::BidirLinearCrossAttnBlock`
+- `ultralytics/nn/modules/block.py::BidirCrossModalA2C2f`
+- `ultralytics/nn/tasks.py::DualStreamDetectionModel` 中 `bidir_cma_stages: [p5]`
+
+实现细节上，`bidir_cma_stages` 会将 RGB/IR 两条 backbone 的 P5 原模块替换为 `Identity`，再由单个 `BidirCrossModalA2C2f` 同时输出两路 P5 特征。这意味着当前实验不是“在原 P5 后追加轻量 residual cross-modal adapter”，而是“用 BidirLiCMA 接管/替换 P5 表征学习”。
+
+### 4.2 训练曲线证据
+
+三条本地 CSV 对比：
+
+| 实验 | CSV | best epoch | best P | best R | best mAP50 | best mAP50-95 | last mAP50-95 |
+|------|-----|-----------:|-------:|-------:|-----------:|--------------:|--------------:|
+| Exp-8d 主基线（无 Bidir） | `runs/detect/RGBT-3M/dual_MF_DMGFusionP2_P2345_P4C3k2_P3aux/results.csv` | 195 | 0.9340 | 0.8999 | 0.9423 | **0.6436** | 0.6434 |
+| + BidirLiCMA@P5 | `runs/detect/RGBT-3M/trying/dual_MF_DMGFusionP2_BidirLiCMAP5_P2345_P4C3k2_P3aux-FAIL/results.csv` | 130 | 0.9304 | 0.9059 | 0.9400 | **0.6322** | 0.6322 |
+| + BidirLiCMA@P5 + dropout=0.1 | `runs/detect/RGBT-3M/trying/dual_MF_DMGFusionP2_BidirLiCMAP5+dropout0.1_P2345_P4C3k2_P3aux-FAIL/results.csv` | 177 | 0.9357 | 0.8974 | 0.9396 | **0.6375** | 0.6369 |
+
+关键中期对照：
+
+| epoch | 实验 | train loss sum | val loss sum | mAP50-95 | 相对 Exp-8d |
+|------:|------|---------------:|-------------:|---------:|------------:|
+| 75 | Exp-8d | 1.979 | 3.270 | 0.6340 | 0 |
+| 75 | Bidir | 1.807 | 3.410 | 0.6274 | -0.0066 |
+| 75 | Bidir+dropout | 1.782 | 3.359 | 0.6306 | -0.0034 |
+| 100 | Exp-8d | 1.807 | 3.328 | 0.6376 | 0 |
+| 100 | Bidir | 1.604 | 3.491 | 0.6306 | -0.0070 |
+| 100 | Bidir+dropout | 1.571 | 3.432 | 0.6331 | -0.0046 |
+| 125 | Exp-8d | 1.675 | 3.368 | 0.6395 | 0 |
+| 125 | Bidir | 1.443 | 3.548 | 0.6314 | -0.0081 |
+| 125 | Bidir+dropout | 1.416 | 3.475 | 0.6358 | -0.0037 |
+
+### 4.3 初步判断
+
+当前结果有明确过拟合/泛化差迹象：Bidir 版本训练 loss 更低，但验证 loss 更高，mAP50-95 长期落后 Exp-8d。dropout=0.1 能缓解（0.6322 -> 0.6375），但没有追平无 Bidir 的 0.6436。
+
+需要特别区分两种可能根因：
+
+1. **容量过强导致过拟合。** BidirLiCMA 在 P5 引入 joint token QKV、LayerNorm、type embedding、DWConv bypass，训练集拟合速度明显更快。
+2. **替换式接管破坏原 P5 表征。** 当前实现用 `Identity` 替换原 RGB/IR P5 A2C2f，再由 `BidirCrossModalA2C2f` 输出两路特征；它测试的是“替换 P5 是否有效”，而不是“跨模态 residual 增量是否有效”。即使 attention `out_proj` 零初始化，DWConv bypass 仍非零初始化，因此起点并不等价于原 P5 A2C2f。
+
+### 4.4 下一步决策
+
+先不改代码。下一步先对三组 best 权重做同一口径 per-class validation，确认 Bidir 失败发生在哪些类别：
+
+```powershell
+python val.py --weights runs\detect\RGBT-3M\dual_MF_DMGFusionP2_P2345_P4C3k2_P3aux\epoch195.pt --input_mode dual_input --batch 4 --device 0
+```
+
+```powershell
+python val.py --weights runs\detect\RGBT-3M\trying\dual_MF_DMGFusionP2_BidirLiCMAP5_P2345_P4C3k2_P3aux-FAIL\weights\best.pt --input_mode dual_input --batch 4 --device 0
+```
+
+```powershell
+python val.py --weights runs\detect\RGBT-3M\trying\dual_MF_DMGFusionP2_BidirLiCMAP5+dropout0.1_P2345_P4C3k2_P3aux-FAIL\weights\best.pt --input_mode dual_input --batch 4 --device 0
+```
+
+判定口径：
+
+- 三类全部下降：停止“替换式 BidirLiCMA@P5”方向。
+- fire/person 上升、smoke 下降：保留探索价值，改为 P5 residual adapter。
+- recall 上升但 mAP50-95 下降：说明跨模态语义可能增加召回但损害定位质量，后续应弱化 residual 或限制作用路径。
+- dropout 版分类别明显接近 Exp-8d：说明正则化方向有效，再考虑 residual + drop-path。
+
+若 per-class 结果支持继续，下一版代码不再替换 P5，而是保留原 P5 A2C2f，并添加零初始化残差：
+
+```text
+x_rgb = p5_rgb_original + gamma * delta_rgb
+x_ir  = p5_ir_original  + gamma * delta_ir
+gamma = 0 at init
+```
+
+并优先测试更小容量配置（如 `n=1` 或 `e=0.25`）与对最终 delta 的 dropout/drop-path，而不是只在 attention projection 后 dropout。
