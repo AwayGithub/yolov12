@@ -67,6 +67,7 @@ from ultralytics.nn.modules import (
     A2C2f,
     CrossModalGating,
     CrossModalA2C2f,
+    BidirCrossModalA2C2f,
     DMGFusion,
     DMGFusionV2,
 )
@@ -506,6 +507,30 @@ class DualStreamDetectionModel(DetectionModel):
                 backbone[layer_idx] = new_layer
             self._cma_layer_to_stage[layer_idx] = stage_name
 
+        # BidirCrossModalA2C2f：joint token 双向线性 cross-attention，单模块同时输出两路
+        # backbone 对应层保持原 A2C2f 不变（用于通道数查询），但前向时被 bidir 模块接管
+        self._bidir_cma_stages = set(self.yaml.get("bidir_cma_stages", []))
+        self._bidir_cma_modules = nn.ModuleDict()
+        self._bidir_layer_to_stage = {}
+        _bidir_c_out = {}  # stage_name -> c2，供 fusion_convs 使用，避免替换后查询 Identity
+        for stage_name in self._bidir_cma_stages:
+            if stage_name in self._cma_stages:
+                raise ValueError(
+                    f"'{stage_name}' 同时出现在 cma_stages 和 bidir_cma_stages，请只选一个"
+                )
+            if stage_name not in self._CMG_CMA_VALID_STAGES:
+                raise ValueError(
+                    f"bidir_cma_stages 中的 '{stage_name}' 不合法，合法值为 {self._CMG_CMA_VALID_STAGES}"
+                )
+            layer_idx = self.FUSION_LAYER_INDICES[stage_name]
+            old_layer = self.backbone_rgb[layer_idx]
+            c1 = old_layer.cv1.conv.in_channels
+            c2 = old_layer.cv2.conv.out_channels
+            n = len(old_layer.m)
+            self._bidir_cma_modules[stage_name] = BidirCrossModalA2C2f(c1, c2, n=n, e=0.5)
+            self._bidir_layer_to_stage[layer_idx] = stage_name
+            _bidir_c_out[stage_name] = c2
+
         # 共享 neck + head
         self.head = nn.Sequential(*list(full_model.children())[backbone_end:])
 
@@ -526,13 +551,28 @@ class DualStreamDetectionModel(DetectionModel):
         _p2_fusion_mode = self.yaml.get("p2_fusion", "plain")
         self.fusion_convs = nn.ModuleDict()
         for stage_name, layer_idx in self.FUSION_LAYER_INDICES.items():
-            c_out = self._get_layer_out_channels(self.backbone_rgb[layer_idx])
+            # bidir 层已缓存 c_out，避免查询后续被替换的 Identity
+            if stage_name in _bidir_c_out:
+                c_out = _bidir_c_out[stage_name]
+            else:
+                c_out = self._get_layer_out_channels(self.backbone_rgb[layer_idx])
             if stage_name == "p2" and _p2_fusion_mode == "dmg":
                 self.fusion_convs[stage_name] = DMGFusion(c_out)
             elif stage_name == "p2" and _p2_fusion_mode == "dmg_v2":
                 self.fusion_convs[stage_name] = DMGFusionV2(c_out)
             else:
                 self.fusion_convs[stage_name] = Conv(c_out * 2, c_out, 1, 1)
+
+        # 原 A2C2f 通道信息已全部提取完毕，替换为 Identity 消除死参数
+        # 保留 .i / .f 属性，forward 循环靠它们确定层索引和输入来源
+        for stage_name in self._bidir_cma_stages:
+            layer_idx = self.FUSION_LAYER_INDICES[stage_name]
+            for backbone in (self.backbone_rgb, self.backbone_ir):
+                old = backbone[layer_idx]
+                placeholder = nn.Identity()
+                placeholder.i = old.i
+                placeholder.f = old.f
+                backbone[layer_idx] = placeholder
 
         # 保留 self.model 引用（stride 计算 + 兼容 DetectionModel 方法）
         self.model = full_model
@@ -607,8 +647,12 @@ class DualStreamDetectionModel(DetectionModel):
                 x_rgb = y_rgb[m_rgb.f] if isinstance(m_rgb.f, int) else [x_rgb if j == -1 else y_rgb[j] for j in m_rgb.f]
             if m_ir.f != -1:
                 x_ir = y_ir[m_ir.f] if isinstance(m_ir.f, int) else [x_ir if j == -1 else y_ir[j] for j in m_ir.f]
-            if layer_idx in self._cma_layer_to_stage:
-                # 双向 CMA：各自以对方当前输入（CMA 前特征）为 KV，无循环依赖
+            if layer_idx in self._bidir_layer_to_stage:
+                # BidirCrossModalA2C2f：joint token 线性双向 cross-attn，单次前向输出两路
+                stage_name = self._bidir_layer_to_stage[layer_idx]
+                x_rgb, x_ir = self._bidir_cma_modules[stage_name](x_rgb, x_ir)
+            elif layer_idx in self._cma_layer_to_stage:
+                # 原 CrossModalA2C2f：两套独立权重，各自以对方输入为 KV
                 x_rgb_new = m_rgb(x_rgb, x_ir)
                 x_ir_new  = m_ir(x_ir,  x_rgb)
                 x_rgb, x_ir = x_rgb_new, x_ir_new

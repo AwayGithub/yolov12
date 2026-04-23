@@ -1527,6 +1527,121 @@ class CrossModalA2C2f(nn.Module):
         return self.cv2(torch.cat(y, 1))
 
 
+class BidirLinearCrossAttnBlock(nn.Module):
+    """Bidirectional linear cross-attention block for dual-stream RGB-IR fusion.
+
+    Concatenates RGB and IR tokens into a joint sequence (2N tokens), applies
+    ELU+1 kernel linear attention (O(N·d²)) for bidirectional cross-modal
+    interaction, splits outputs back, then adds a per-modality DWConv3×3 bypass
+    for local spatial context.
+
+    Args:
+        channels (int): Hidden channel count C (multiple of 32; = c_ inside A2C2f).
+        num_heads (int): Number of attention heads (channels // 32).
+    """
+
+    def __init__(self, channels: int, num_heads: int):
+        """Initialise bidirectional linear cross-attention with DWConv spatial bypass."""
+        super().__init__()
+        assert channels % num_heads == 0
+        self.num_heads = num_heads
+        self.head_dim = channels // num_heads
+
+        # Learnable type embeddings: distinguish RGB (index 0) from IR (index 1)
+        self.type_embed = nn.Parameter(torch.zeros(2, 1, channels))
+
+        # Joint QKV projection applied to the 2N-token sequence
+        self.qkv = nn.Linear(channels, channels * 3, bias=False)
+        self.out_proj = nn.Linear(channels, channels, bias=False)
+        self.attn_drop = nn.Dropout(p=0.1)
+
+        # LayerNorm on the joint token sequence (sequence-level normalisation)
+        self.norm = nn.LayerNorm(channels)
+
+        # DWConv3×3 bypass per modality — restores local spatial context lost by global attn
+        self.conv_rgb = Conv(channels, channels, 3, g=channels, act=False)
+        self.conv_ir = Conv(channels, channels, 3, g=channels, act=False)
+
+        # Zero-init out_proj so the module starts as a pure conv bypass
+        nn.init.zeros_(self.out_proj.weight)
+
+    def forward(self, x_rgb, x_ir):
+        """Joint linear attention on RGB+IR tokens, split back, add DWConv bypass."""
+        B, C, H, W = x_rgb.shape
+        N = H * W
+        nh, hd = self.num_heads, self.head_dim
+
+        # Flatten spatial dims and inject type embeddings
+        r = x_rgb.flatten(2).permute(0, 2, 1) + self.type_embed[0]  # (B, N, C)
+        i = x_ir.flatten(2).permute(0, 2, 1) + self.type_embed[1]   # (B, N, C)
+
+        # Joint sequence: (B, 2N, C)
+        tokens = self.norm(torch.cat([r, i], dim=1))
+
+        # QKV projection and multi-head reshape
+        Q, K, V = self.qkv(tokens).split(C, dim=-1)              # each (B, 2N, C)
+        Q = Q.reshape(B, 2 * N, nh, hd).transpose(1, 2)          # (B, nh, 2N, hd)
+        K = K.reshape(B, 2 * N, nh, hd).transpose(1, 2)
+        V = V.reshape(B, 2 * N, nh, hd).transpose(1, 2)
+
+        # ELU+1 feature maps (linear attention kernel, avoids softmax zero-sum)
+        phi_Q = torch.nn.functional.elu(Q) + 1                   # (B, nh, 2N, hd)
+        phi_K = torch.nn.functional.elu(K) + 1
+
+        # O(N·d²) linear attention: cache KV independently of sequence length
+        KV = phi_K.transpose(-2, -1) @ V                         # (B, nh, hd, hd)
+        denom = phi_Q @ phi_K.sum(dim=-2, keepdim=True).transpose(-2, -1)  # (B, nh, 2N, 1)
+        out = (phi_Q @ KV) / (denom + 1e-6)                      # (B, nh, 2N, hd)
+
+        # Merge heads → project → dropout → restore spatial dims
+        out = self.attn_drop(self.out_proj(out.transpose(1, 2).reshape(B, 2 * N, C)))  # (B, 2N, C)
+        out_r = out[:, :N].permute(0, 2, 1).reshape(B, C, H, W)
+        out_i = out[:, N:].permute(0, 2, 1).reshape(B, C, H, W)
+
+        # Add DWConv bypass for local spatial information
+        return out_r + self.conv_rgb(x_rgb), out_i + self.conv_ir(x_ir)
+
+
+class BidirCrossModalA2C2f(nn.Module):
+    """A2C2f-level wrapper for BidirLinearCrossAttnBlock.
+
+    Stacks n BidirLinearCrossAttnBlock layers, processing both RGB and IR jointly.
+    Returns enhanced features for both modalities simultaneously.
+
+    forward(x_rgb, x_ir) -> (enhanced_rgb, enhanced_ir)
+
+    Args:
+        c1 (int): Input channel count for each stream.
+        c2 (int): Output channel count for each stream.
+        n (int): Number of BidirLinearCrossAttnBlock layers. Default 2.
+        e (float): Hidden channel expansion ratio. Default 0.5.
+    """
+
+    def __init__(self, c1: int, c2: int, n: int = 2, e: float = 0.5):
+        """Initialise BidirCrossModalA2C2f with n bidirectional linear cross-attn blocks."""
+        super().__init__()
+        c_ = int(c2 * e)
+        assert c_ % 32 == 0, "Hidden dim must be a multiple of 32."
+        num_heads = c_ // 32
+
+        self.cv1_rgb = Conv(c1, c_, 1, 1)
+        self.cv1_ir = Conv(c1, c_, 1, 1)
+        self.cv2_rgb = Conv(c_, c2, 1)
+        self.cv2_ir = Conv(c_, c2, 1)
+
+        self.blocks = nn.ModuleList(
+            BidirLinearCrossAttnBlock(c_, num_heads) for _ in range(n)
+        )
+
+    def forward(self, x_rgb, x_ir):
+        """Apply n bidirectional cross-attn blocks; return enhanced RGB and IR features."""
+        feat_r = self.cv1_rgb(x_rgb)
+        feat_i = self.cv1_ir(x_ir)
+        for blk in self.blocks:
+            feat_r, feat_i = blk(feat_r, feat_i)
+        return self.cv2_rgb(feat_r), self.cv2_ir(feat_i)
+
+
 class DMGFusion(nn.Module):
     """Differential Modality-Guided Fusion for P2 RGB-IR streams (ADR-001 §6, Exp-7).
 

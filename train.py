@@ -193,7 +193,7 @@ if __name__ == "__main__":
     results = model.train(
         data=data_cfg,
         resume=bool(args.resume),
-        epochs=args.epochs if args.epochs is not None else 300,
+        epochs=args.epochs if args.epochs is not None else 200,
         imgsz=[480, 640],  # 输入模型的尺寸，也是验证的尺寸
         batch=16,
         workers=0,

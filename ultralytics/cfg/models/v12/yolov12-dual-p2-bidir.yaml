@@ -1,0 +1,63 @@
+# YOLOv12-MF-P2-Bidir: DMGFusion v1@P2 + BidirLinearCrossAttn@P5
+# 基线：Exp-8d（mAP50-95=0.644）
+#   - 无 CMG/CMA
+#   - P4 C3k2（替代 A2C2f，消除 strip 噪声）
+#   - P3 RGB/IR aux head（aux_loss_weight=0.25）
+#   - DMGFusion v1@P2
+#   - 4-scale head（P2/P3/P4/P5）
+# 新增：
+#   - BidirCrossModalA2C2f@P5（joint token 双向线性 cross-attn）
+
+nc: 3           # smoke, fire, person
+ch: 6           # 6-channel dual-stream input
+dual_stream: true
+
+cmg_stages: []             # 无 CMG（Exp-8d 已证明冗余）
+cma_stages: []             # 无旧式单向 CMA
+bidir_cma_stages: [p5]     # BidirCrossModalA2C2f 接管 P5 层
+p2_fusion: dmg             # DMGFusion v1@P2
+
+scales:
+  n: [0.50, 0.25, 1024]
+  s: [0.50, 0.50, 1024]
+
+# Backbone —— 与 yolov12-dual-p2.yaml 完全相同，P4 已为 C3k2
+backbone:
+  # [from, repeats, module, args]
+  - [-1, 1, Conv,   [64, 3, 2]]           # 0-P1/2
+  - [-1, 1, Conv,   [128, 3, 2, 1, 2]]    # 1-P2/4
+  - [-1, 2, C3k2,   [256, False, 0.25]]   # 2 <- P2 fusion point
+  - [-1, 1, Conv,   [256, 3, 2, 1, 4]]    # 3-P3/8
+  - [-1, 2, C3k2,   [512, False, 0.25]]   # 4 <- P3 fusion point
+  - [-1, 1, Conv,   [512, 3, 2]]          # 5-P4/16
+  - [-1, 4, C3k2,   [512, True]]          # 6 <- P4 fusion point（C3k2，消除 strip 噪声）
+  - [-1, 1, Conv,   [1024, 3, 2]]         # 7-P5/32
+  - [-1, 4, A2C2f,  [1024, True, 1]]      # 8 <- P5 fusion point（由 bidir_cma_stages 接管）
+
+# Head —— 与 yolov12-dual-p2.yaml 完全相同
+head:
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]   # 9
+  - [[-1, 6], 1, Concat, [1]]                    # 10
+  - [-1, 2, A2C2f, [512, False, -1]]              # 11
+
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]   # 12
+  - [[-1, 4], 1, Concat, [1]]                    # 13
+  - [-1, 2, A2C2f, [256, False, -1]]              # 14
+
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]   # 15
+  - [[-1, 2], 1, Concat, [1]]                    # 16
+  - [-1, 2, C3k2, [128, False, 0.25]]             # 17
+
+  - [-1, 1, Conv, [128, 3, 2]]                   # 18
+  - [[-1, 14], 1, Concat, [1]]                   # 19
+  - [-1, 2, A2C2f, [256, False, -1]]              # 20
+
+  - [-1, 1, Conv, [256, 3, 2]]                   # 21
+  - [[-1, 11], 1, Concat, [1]]                   # 22
+  - [-1, 2, A2C2f, [512, False, -1]]              # 23
+
+  - [-1, 1, Conv, [512, 3, 2]]                   # 24
+  - [[-1, 8], 1, Concat, [1]]                    # 25
+  - [-1, 2, C3k2, [1024, True]]                  # 26
+
+  - [[17, 20, 23, 26], 1, Detect, [nc]]           # 27

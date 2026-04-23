@@ -60,6 +60,8 @@ from .block import (
     A2C2f,
     CrossModalGating,
     CrossModalA2C2f,
+    BidirLinearCrossAttnBlock,
+    BidirCrossModalA2C2f,
     DMGFusion,
     DMGFusionV2,
 )
