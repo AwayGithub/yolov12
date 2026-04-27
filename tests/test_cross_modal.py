@@ -1,5 +1,6 @@
 """Smoke tests for cross-modal attention modules (Exp-4b: bidirectional residual CMA)."""
 
+import pytest
 import torch
 
 from ultralytics.nn.modules.block import CrossModalA2C2f, CrossModalAAttn
@@ -163,3 +164,47 @@ def test_dual_stream_p2_rejects_cmg_at_p2():
     cfg["cmg_stages"] = ["p2"]
     with pytest.raises(ValueError, match="p2"):
         DualStreamDetectionModel(cfg, nc=3, verbose=False)
+
+
+def test_sgmc_calibrates_multiscale_features():
+    """SGMC preserves target feature shapes and exposes bounded gate debug state."""
+    from ultralytics.nn.modules.block import SemanticGuidedMultiScaleCalibration
+
+    channels = {"p3": 128, "p4": 256, "p5": 512}
+    m = SemanticGuidedMultiScaleCalibration(
+        channels=channels,
+        source="p5",
+        targets=("p3", "p4", "p5"),
+        ratio=0.25,
+        gate_limit=0.1,
+        init_gate=0.001,
+    )
+    feats = {
+        "p3": torch.randn(2, 128, 32, 32),
+        "p4": torch.randn(2, 256, 16, 16),
+        "p5": torch.randn(2, 512, 8, 8),
+    }
+    out = m(feats)
+    assert set(out) == set(feats)
+    for stage_name, feat in feats.items():
+        assert out[stage_name].shape == feat.shape
+    debug = m.debug_state()
+    assert debug["p3_gate"] == pytest.approx(0.001, abs=1e-6)
+    assert debug["p4_gate"] == pytest.approx(0.001, abs=1e-6)
+    assert debug["p5_gate"] == pytest.approx(0.001, abs=1e-6)
+
+
+def test_dual_stream_p2_sgmc_forward_and_debug_state():
+    """SGMC YAML builds a four-scale model and logs per-stage SGMC gate scalars."""
+    from ultralytics.nn.tasks import DualStreamDetectionModel
+
+    model = DualStreamDetectionModel("yolov12-dual-p2-sgmc.yaml", nc=3, verbose=False)
+    model.eval()
+    x = torch.zeros(1, 6, 128, 128)
+    with torch.no_grad():
+        out = model(x)
+    assert out is not None
+    debug = model.adapter_debug_state()
+    assert "sgmc/p3_gate" in debug
+    assert "sgmc/p4_gate" in debug
+    assert "sgmc/p5_gate" in debug

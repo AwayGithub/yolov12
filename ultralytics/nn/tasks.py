@@ -68,6 +68,8 @@ from ultralytics.nn.modules import (
     CrossModalGating,
     CrossModalA2C2f,
     BidirCrossModalA2C2f,
+    ResidualGatedBidirLiCMAAdapter,
+    SemanticGuidedMultiScaleCalibration,
     DMGFusion,
     DMGFusionV2,
 )
@@ -512,6 +514,7 @@ class DualStreamDetectionModel(DetectionModel):
         self._bidir_cma_stages = set(self.yaml.get("bidir_cma_stages", []))
         self._bidir_cma_modules = nn.ModuleDict()
         self._bidir_layer_to_stage = {}
+        self._bidir_attn_dropout = float(self.yaml.get("bidir_attn_dropout", 0.1))
         _bidir_c_out = {}  # stage_name -> c2，供 fusion_convs 使用，避免替换后查询 Identity
         for stage_name in self._bidir_cma_stages:
             if stage_name in self._cma_stages:
@@ -527,9 +530,57 @@ class DualStreamDetectionModel(DetectionModel):
             c1 = old_layer.cv1.conv.in_channels
             c2 = old_layer.cv2.conv.out_channels
             n = len(old_layer.m)
-            self._bidir_cma_modules[stage_name] = BidirCrossModalA2C2f(c1, c2, n=n, e=0.5)
+            self._bidir_cma_modules[stage_name] = BidirCrossModalA2C2f(
+                c1,
+                c2,
+                n=n,
+                e=0.5,
+                attn_dropout=self._bidir_attn_dropout,
+            )
             self._bidir_layer_to_stage[layer_idx] = stage_name
             _bidir_c_out[stage_name] = c2
+
+        # Residual-gated adapter：保留原 backbone 主路径，仅注入受控双向跨模态残差
+        self._bidir_adapter_stages = set(self.yaml.get("bidir_adapter_stages", []))
+        self._bidir_adapter_modules = nn.ModuleDict()
+        self._bidir_adapter_ratio = float(self.yaml.get("bidir_adapter_ratio", 0.5))
+        self._bidir_adapter_gate_limit = float(self.yaml.get("bidir_adapter_gate_limit", 0.1))
+        self._bidir_adapter_init_gate = float(self.yaml.get("bidir_adapter_init_gate", 1e-3))
+        self._bidir_adapter_blocks = int(self.yaml.get("bidir_adapter_blocks", 1))
+        for stage_name in self._bidir_adapter_stages:
+            if stage_name in self._cma_stages or stage_name in self._bidir_cma_stages:
+                raise ValueError(
+                    f"'{stage_name}' 同时出现在 cma_stages/bidir_cma_stages 与 bidir_adapter_stages，请只选一种接入方式"
+                )
+            if stage_name not in self._CMG_CMA_VALID_STAGES:
+                raise ValueError(
+                    f"bidir_adapter_stages 中的 '{stage_name}' 不合法，合法值为 {self._CMG_CMA_VALID_STAGES}"
+                )
+            layer_idx = self.FUSION_LAYER_INDICES[stage_name]
+            old_layer = self.backbone_rgb[layer_idx]
+            c_out = old_layer.cv2.conv.out_channels
+            self._bidir_adapter_modules[stage_name] = ResidualGatedBidirLiCMAAdapter(
+                c_out,
+                ratio=self._bidir_adapter_ratio,
+                num_blocks=self._bidir_adapter_blocks,
+                gate_limit=self._bidir_adapter_gate_limit,
+                init_gate=self._bidir_adapter_init_gate,
+            )
+
+        # SGMC：使用高层语义轻量校准多尺度 fused 特征，不改 backbone 主路径。
+        self._sgmc_targets = tuple(self.yaml.get("sgmc_targets", []))
+        self._sgmc_module = None
+        if self._sgmc_targets:
+            sgmc_valid_stages = frozenset(self.FUSION_LAYER_INDICES)
+            self._sgmc_source = self.yaml.get("sgmc_source", "p5")
+            self._sgmc_ratio = float(self.yaml.get("sgmc_ratio", 0.25))
+            self._sgmc_gate_limit = float(self.yaml.get("sgmc_gate_limit", 0.1))
+            self._sgmc_init_gate = float(self.yaml.get("sgmc_init_gate", 1e-3))
+            if self._sgmc_source not in sgmc_valid_stages:
+                raise ValueError(f"sgmc_source '{self._sgmc_source}' 不合法，合法值为 {sgmc_valid_stages}")
+            for stage_name in self._sgmc_targets:
+                if stage_name not in sgmc_valid_stages:
+                    raise ValueError(f"sgmc_targets 中的 '{stage_name}' 不合法，合法值为 {sgmc_valid_stages}")
 
         # 共享 neck + head
         self.head = nn.Sequential(*list(full_model.children())[backbone_end:])
@@ -562,6 +613,20 @@ class DualStreamDetectionModel(DetectionModel):
                 self.fusion_convs[stage_name] = DMGFusionV2(c_out)
             else:
                 self.fusion_convs[stage_name] = Conv(c_out * 2, c_out, 1, 1)
+
+        if self._sgmc_targets:
+            sgmc_stages = set(self._sgmc_targets) | {self._sgmc_source}
+            sgmc_channels = {
+                stage_name: self._get_layer_out_channels(self.fusion_convs[stage_name]) for stage_name in sgmc_stages
+            }
+            self._sgmc_module = SemanticGuidedMultiScaleCalibration(
+                channels=sgmc_channels,
+                source=self._sgmc_source,
+                targets=self._sgmc_targets,
+                ratio=self._sgmc_ratio,
+                gate_limit=self._sgmc_gate_limit,
+                init_gate=self._sgmc_init_gate,
+            )
 
         # 原 A2C2f 通道信息已全部提取完毕，替换为 Identity 消除死参数
         # 保留 .i / .f 属性，forward 循环靠它们确定层索引和输入来源
@@ -667,6 +732,17 @@ class DualStreamDetectionModel(DetectionModel):
                     feats_ir[stage_name]  = x_ir
         return feats_rgb, feats_ir
 
+    def adapter_debug_state(self):
+        """Collect scalar debug variables from residual-gated bidir adapters."""
+        debug = {}
+        for stage_name, module in self._bidir_adapter_modules.items():
+            for key, value in module.debug_state().items():
+                debug[f"adapter/{stage_name}_{key}"] = value
+        if self._sgmc_module is not None:
+            for key, value in self._sgmc_module.debug_state().items():
+                debug[f"sgmc/{key}"] = value
+        return debug
+
     def _predict_once(self, x, profile=False, visualize=False, embed=None):
         """双分支前向传播。输入 x 形状 (B, 6, H, W)，0:3=IR_RGB, 3:6=VIS_RGB。"""
         assert x.shape[1] == 6, f"Expected 6-channel input, got {x.shape[1]}"
@@ -675,6 +751,10 @@ class DualStreamDetectionModel(DetectionModel):
 
         # 双向 CMA：两分支同步运行，在 CMA 层互以对方输入为 KV
         feats_rgb, feats_ir = self._forward_both_backbones(x_rgb, x_ir)
+
+        # Residual-gated bidir adapters：只做受控补充，不替换主路径
+        for stage_name, module in self._bidir_adapter_modules.items():
+            feats_rgb[stage_name], feats_ir[stage_name] = module(feats_rgb[stage_name], feats_ir[stage_name])
 
         # 辅助检测头（训练专用，pre-CMG 纯 backbone 特征，强制 RGB/IR 各自保留目标语义）
         if self.training and self.use_aux_head:
@@ -695,6 +775,8 @@ class DualStreamDetectionModel(DetectionModel):
             r, i = feats_rgb[stage_name], feats_ir[stage_name]
             fc = self.fusion_convs[stage_name]
             fused[stage_name] = fc(r, i) if isinstance(fc, (DMGFusion, DMGFusionV2)) else fc(torch.cat([r, i], dim=1))
+        if self._sgmc_module is not None:
+            fused = self._sgmc_module(fused)
 
         # 构造 y 列表供 head 使用跳连索引
         y = [None] * (max(self.FUSION_LAYER_INDICES.values()) + 1)

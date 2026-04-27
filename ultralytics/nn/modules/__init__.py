@@ -62,6 +62,8 @@ from .block import (
     CrossModalA2C2f,
     BidirLinearCrossAttnBlock,
     BidirCrossModalA2C2f,
+    ResidualGatedBidirLiCMAAdapter,
+    SemanticGuidedMultiScaleCalibration,
     DMGFusion,
     DMGFusionV2,
 )
@@ -169,6 +171,10 @@ __all__ = (
     "Index",
     "A2C2f",
     "CrossModalGating",
+    "BidirLinearCrossAttnBlock",
+    "BidirCrossModalA2C2f",
+    "ResidualGatedBidirLiCMAAdapter",
+    "SemanticGuidedMultiScaleCalibration",
     "DMGFusion",
     "DMGFusionV2",
 )

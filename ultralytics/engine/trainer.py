@@ -47,6 +47,7 @@ from ultralytics.utils.torch_utils import (
     ModelEMA,
     autocast,
     convert_optimizer_state_dict_to_fp16,
+    de_parallel,
     init_seeds,
     one_cycle,
     select_device,
@@ -439,7 +440,8 @@ class BaseTrainer:
                 )
                 if did_validate:
                     self.metrics, self.fitness = self.validate()
-                self.save_metrics(metrics={**self.label_loss_items(self.tloss), **self.metrics, **self.lr})
+                debug_metrics = self.collect_model_debug_metrics()
+                self.save_metrics(metrics={**self.label_loss_items(self.tloss), **self.metrics, **debug_metrics, **self.lr})
                 self.stop |= self.stopper(epoch + 1, self.fitness) or final_epoch
                 if self.args.time:
                     self.stop |= (time.time() - self.train_time_start) > (self.args.time * 3600)
@@ -524,6 +526,7 @@ class BaseTrainer:
 
         # Serialize ckpt to a byte buffer once (faster than repeated torch.save() calls)
         buffer = io.BytesIO()
+        debug_metrics = self.collect_model_debug_metrics()
         torch.save(
             {
                 "epoch": self.epoch,
@@ -533,7 +536,7 @@ class BaseTrainer:
                 "updates": self.ema.updates,
                 "optimizer": convert_optimizer_state_dict_to_fp16(deepcopy(self.optimizer.state_dict())),
                 "train_args": vars(self.args),  # save as dict
-                "train_metrics": {**self.metrics, **{"fitness": self.fitness}},
+                "train_metrics": {**self.metrics, **debug_metrics, **{"fitness": self.fitness}},
                 "train_results": self.read_results_csv(),
                 "date": datetime.now().isoformat(),
                 "version": __version__,
@@ -673,6 +676,14 @@ class BaseTrainer:
         t = time.time() - self.train_time_start
         with open(self.csv, "a") as f:
             f.write(s + ("%.6g," * n % tuple([self.epoch + 1, t] + vals)).rstrip(",") + "\n")
+
+    def collect_model_debug_metrics(self):
+        """Collect optional scalar debug metrics exposed by the active model."""
+        model = getattr(getattr(self, "ema", None), "ema", None) or self.model
+        model = de_parallel(model)
+        if hasattr(model, "adapter_debug_state"):
+            return model.adapter_debug_state()
+        return {}
 
     def plot_metrics(self):
         """Plot and display metrics visually."""

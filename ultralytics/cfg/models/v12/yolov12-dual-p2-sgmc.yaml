@@ -1,0 +1,66 @@
+# YOLOv12-MF-P2-SGMC: Exp-8d + semantic-guided multi-scale calibration
+# 基线：Exp-8d（mAP50-95=0.644）
+#   - 无 CMG/CMA
+#   - P4 C3k2（替代 A2C2f，消除 strip 噪声）
+#   - P3 RGB/IR aux head（aux_loss_weight=0.25）
+#   - DMGFusion v1@P2
+#   - 4-scale head（P2/P3/P4/P5）
+# 新增：
+#   - SGMC：用 P5 语义向量轻量校准 P3/P4/P5 fused 特征
+
+nc: 3
+ch: 6
+dual_stream: true
+
+cmg_stages: []
+cma_stages: []
+bidir_cma_stages: []
+bidir_adapter_stages: []
+sgmc_source: p5
+sgmc_targets: [p3, p4, p5]
+sgmc_ratio: 0.25
+sgmc_gate_limit: 0.1
+sgmc_init_gate: 0.001
+p2_fusion: dmg
+
+scales:
+  n: [0.50, 0.25, 1024]
+  s: [0.50, 0.50, 1024]
+
+backbone:
+  - [-1, 1, Conv,   [64, 3, 2]]
+  - [-1, 1, Conv,   [128, 3, 2, 1, 2]]
+  - [-1, 2, C3k2,   [256, False, 0.25]]
+  - [-1, 1, Conv,   [256, 3, 2, 1, 4]]
+  - [-1, 2, C3k2,   [512, False, 0.25]]
+  - [-1, 1, Conv,   [512, 3, 2]]
+  - [-1, 4, C3k2,   [512, True]]
+  - [-1, 1, Conv,   [1024, 3, 2]]
+  - [-1, 4, A2C2f,  [1024, True, 1]]
+
+head:
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]
+  - [[-1, 6], 1, Concat, [1]]
+  - [-1, 2, A2C2f, [512, False, -1]]
+
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]
+  - [[-1, 4], 1, Concat, [1]]
+  - [-1, 2, A2C2f, [256, False, -1]]
+
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]
+  - [[-1, 2], 1, Concat, [1]]
+  - [-1, 2, C3k2, [128, False, 0.25]]
+
+  - [-1, 1, Conv, [128, 3, 2]]
+  - [[-1, 14], 1, Concat, [1]]
+  - [-1, 2, A2C2f, [256, False, -1]]
+
+  - [-1, 1, Conv, [256, 3, 2]]
+  - [[-1, 11], 1, Concat, [1]]
+  - [-1, 2, A2C2f, [512, False, -1]]
+
+  - [-1, 1, Conv, [512, 3, 2]]
+  - [[-1, 8], 1, Concat, [1]]
+  - [-1, 2, C3k2, [1024, True]]
+
+  - [[17, 20, 23, 26], 1, Detect, [nc]]

@@ -1,6 +1,7 @@
 # Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
 """Block modules."""
 
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -51,6 +52,7 @@ __all__ = (
     "SCDown",
     "TorchVision",
     "DMGFusion",
+    "SemanticGuidedMultiScaleCalibration",
 )
 
 
@@ -1540,7 +1542,7 @@ class BidirLinearCrossAttnBlock(nn.Module):
         num_heads (int): Number of attention heads (channels // 32).
     """
 
-    def __init__(self, channels: int, num_heads: int):
+    def __init__(self, channels: int, num_heads: int, attn_dropout: float = 0.1):
         """Initialise bidirectional linear cross-attention with DWConv spatial bypass."""
         super().__init__()
         assert channels % num_heads == 0
@@ -1553,7 +1555,7 @@ class BidirLinearCrossAttnBlock(nn.Module):
         # Joint QKV projection applied to the 2N-token sequence
         self.qkv = nn.Linear(channels, channels * 3, bias=False)
         self.out_proj = nn.Linear(channels, channels, bias=False)
-        self.attn_drop = nn.Dropout(p=0.1)
+        self.attn_drop = nn.Dropout(p=attn_dropout)
 
         # LayerNorm on the joint token sequence (sequence-level normalisation)
         self.norm = nn.LayerNorm(channels)
@@ -1564,6 +1566,12 @@ class BidirLinearCrossAttnBlock(nn.Module):
 
         # Zero-init out_proj so the module starts as a pure conv bypass
         nn.init.zeros_(self.out_proj.weight)
+
+    def __setstate__(self, state):
+        """Backfill newly added attributes when loading old pickled checkpoints."""
+        self.__dict__.update(state)
+        if not hasattr(self, "attn_drop"):
+            self.attn_drop = nn.Identity()
 
     def forward(self, x_rgb, x_ir):
         """Joint linear attention on RGB+IR tokens, split back, add DWConv bypass."""
@@ -1594,7 +1602,8 @@ class BidirLinearCrossAttnBlock(nn.Module):
         out = (phi_Q @ KV) / (denom + 1e-6)                      # (B, nh, 2N, hd)
 
         # Merge heads → project → dropout → restore spatial dims
-        out = self.attn_drop(self.out_proj(out.transpose(1, 2).reshape(B, 2 * N, C)))  # (B, 2N, C)
+        attn_drop = getattr(self, "attn_drop", nn.Identity())
+        out = attn_drop(self.out_proj(out.transpose(1, 2).reshape(B, 2 * N, C)))  # (B, 2N, C)
         out_r = out[:, :N].permute(0, 2, 1).reshape(B, C, H, W)
         out_i = out[:, N:].permute(0, 2, 1).reshape(B, C, H, W)
 
@@ -1617,7 +1626,7 @@ class BidirCrossModalA2C2f(nn.Module):
         e (float): Hidden channel expansion ratio. Default 0.5.
     """
 
-    def __init__(self, c1: int, c2: int, n: int = 2, e: float = 0.5):
+    def __init__(self, c1: int, c2: int, n: int = 2, e: float = 0.5, attn_dropout: float = 0.1):
         """Initialise BidirCrossModalA2C2f with n bidirectional linear cross-attn blocks."""
         super().__init__()
         c_ = int(c2 * e)
@@ -1630,7 +1639,7 @@ class BidirCrossModalA2C2f(nn.Module):
         self.cv2_ir = Conv(c_, c2, 1)
 
         self.blocks = nn.ModuleList(
-            BidirLinearCrossAttnBlock(c_, num_heads) for _ in range(n)
+            BidirLinearCrossAttnBlock(c_, num_heads, attn_dropout=attn_dropout) for _ in range(n)
         )
 
     def forward(self, x_rgb, x_ir):
@@ -1640,6 +1649,178 @@ class BidirCrossModalA2C2f(nn.Module):
         for blk in self.blocks:
             feat_r, feat_i = blk(feat_r, feat_i)
         return self.cv2_rgb(feat_r), self.cv2_ir(feat_i)
+
+
+class ResidualGatedBidirLiCMAAdapter(nn.Module):
+    """Lightweight bidirectional cross-modal adapter with bounded residual gates.
+
+    This module preserves the original backbone path and injects only a small,
+    trainable residual correction. It is designed for strong baselines such as
+    Exp-8d, where we want to test whether P5 still benefits from a controlled
+    amount of bidirectional cross-modal interaction.
+
+    Args:
+        channels (int): Input/output channel count of the target stage.
+        ratio (float): Hidden width ratio for the adapter branch. Default 0.5.
+        num_blocks (int): Number of BidirLinearCrossAttnBlock blocks. Default 1.
+        gate_limit (float): Max residual scale after tanh-bounding. Default 0.1.
+        init_gate (float): Initial non-zero residual gate. Default 1e-3.
+    """
+
+    def __init__(
+        self,
+        channels: int,
+        ratio: float = 0.5,
+        num_blocks: int = 1,
+        gate_limit: float = 0.1,
+        init_gate: float = 1e-3,
+    ):
+        """Initialise residual-gated P5 bidirectional cross-modal adapter."""
+        super().__init__()
+        hidden = int(channels * ratio)
+        hidden = max(32, (hidden // 32) * 32)
+        assert hidden > 0 and hidden % 32 == 0, "Hidden dim must be a positive multiple of 32."
+        num_heads = hidden // 32
+
+        self.gate_limit = float(gate_limit)
+        self.init_gate = float(init_gate)
+        if self.gate_limit <= 0:
+            raise ValueError("gate_limit must be positive.")
+        if abs(self.init_gate) >= self.gate_limit:
+            raise ValueError("init_gate magnitude must be smaller than gate_limit.")
+        self.cv1_rgb = Conv(channels, hidden, 1, 1)
+        self.cv1_ir = Conv(channels, hidden, 1, 1)
+        self.blocks = nn.ModuleList(BidirLinearCrossAttnBlock(hidden, num_heads) for _ in range(num_blocks))
+        self.cv2_rgb = Conv(hidden, channels, 1, 1, act=False)
+        self.cv2_ir = Conv(hidden, channels, 1, 1, act=False)
+
+        # Zero-init residual projections so the adapter starts as an exact identity mapping.
+        nn.init.zeros_(self.cv2_rgb.conv.weight)
+        nn.init.zeros_(self.cv2_ir.conv.weight)
+        if self.cv2_rgb.conv.bias is not None:
+            nn.init.zeros_(self.cv2_rgb.conv.bias)
+        if self.cv2_ir.conv.bias is not None:
+            nn.init.zeros_(self.cv2_ir.conv.bias)
+
+        # Scalar residual gates, bounded by gate_limit * tanh(.). A tiny non-zero gate keeps
+        # zero-initialized residual projections trainable while the initial output remains identity.
+        init_gamma = math.atanh(self.init_gate / self.gate_limit)
+        self.gamma_rgb = nn.Parameter(torch.full((1,), init_gamma))
+        self.gamma_ir = nn.Parameter(torch.full((1,), init_gamma))
+
+    def _gate_rgb(self):
+        """Return bounded RGB residual gate scalar."""
+        return self.gate_limit * torch.tanh(self.gamma_rgb)
+
+    def _gate_ir(self):
+        """Return bounded IR residual gate scalar."""
+        return self.gate_limit * torch.tanh(self.gamma_ir)
+
+    def debug_state(self):
+        """Return scalar debug variables for logging/checkpoint metadata."""
+        gate_rgb = self._gate_rgb().detach().item()
+        gate_ir = self._gate_ir().detach().item()
+        return {
+            "gamma_rgb": self.gamma_rgb.detach().item(),
+            "gamma_ir": self.gamma_ir.detach().item(),
+            "gate_rgb": gate_rgb,
+            "gate_ir": gate_ir,
+        }
+
+    def forward(self, x_rgb, x_ir):
+        """Inject bounded bidirectional residual corrections into both modalities."""
+        feat_r = self.cv1_rgb(x_rgb)
+        feat_i = self.cv1_ir(x_ir)
+        for blk in self.blocks:
+            feat_r, feat_i = blk(feat_r, feat_i)
+
+        delta_r = self.cv2_rgb(feat_r)
+        delta_i = self.cv2_ir(feat_i)
+        return x_rgb + self._gate_rgb() * delta_r, x_ir + self._gate_ir() * delta_i
+
+
+class SemanticGuidedMultiScaleCalibration(nn.Module):
+    """Use high-level semantic context to lightly recalibrate multi-scale fused features.
+
+    The module extracts a global semantic descriptor from one source stage (typically p5)
+    and uses it to generate per-channel calibration masks for selected target stages.
+    Each stage has a bounded scalar residual gate so the module starts close to identity.
+
+    Args:
+        channels (dict[str, int]): Channel count for each target/source stage.
+        source (str): Stage name that provides the semantic descriptor.
+        targets (tuple[str, ...]): Stage names to recalibrate.
+        ratio (float): Hidden ratio for the descriptor MLP.
+        gate_limit (float): Maximum residual gate magnitude after tanh bounding.
+        init_gate (float): Initial gate value, must satisfy abs(init_gate) < gate_limit.
+    """
+
+    def __init__(
+        self,
+        channels,
+        source="p5",
+        targets=("p3", "p4", "p5"),
+        ratio=0.25,
+        gate_limit=0.1,
+        init_gate=1e-3,
+    ):
+        """Initialise semantic-guided multi-scale calibration."""
+        super().__init__()
+        if source not in channels:
+            raise ValueError(f"source '{source}' is not defined in channels.")
+        if gate_limit <= 0:
+            raise ValueError("gate_limit must be positive.")
+        if abs(init_gate) >= gate_limit:
+            raise ValueError("init_gate magnitude must be smaller than gate_limit.")
+        for stage_name in targets:
+            if stage_name not in channels:
+                raise ValueError(f"target '{stage_name}' is not defined in channels.")
+
+        self.source = source
+        self.targets = tuple(targets)
+        self.gate_limit = float(gate_limit)
+        self.init_gate = float(init_gate)
+
+        source_channels = int(channels[source])
+        hidden = max(32, int(source_channels * ratio))
+        self.source_proj = nn.Sequential(
+            nn.Linear(source_channels, hidden, bias=True),
+            nn.SiLU(),
+        )
+        self.target_mlps = nn.ModuleDict({
+            stage_name: nn.Sequential(
+                nn.Linear(hidden, channels[stage_name], bias=True),
+                nn.Sigmoid(),
+            ) for stage_name in self.targets
+        })
+
+        init_gamma = math.atanh(self.init_gate / self.gate_limit)
+        self.gammas = nn.ParameterDict({
+            stage_name: nn.Parameter(torch.full((1,), init_gamma)) for stage_name in self.targets
+        })
+
+    def _gate(self, stage_name):
+        """Return bounded residual gate scalar for one target stage."""
+        return self.gate_limit * torch.tanh(self.gammas[stage_name])
+
+    def debug_state(self):
+        """Return SGMC gate and gamma scalars for logging."""
+        debug = {}
+        for stage_name in self.targets:
+            debug[f"{stage_name}_gamma"] = self.gammas[stage_name].detach().item()
+            debug[f"{stage_name}_gate"] = self._gate(stage_name).detach().item()
+        return debug
+
+    def forward(self, feats):
+        """Apply semantic-guided residual calibration to target stages."""
+        z = F.adaptive_avg_pool2d(feats[self.source], 1).flatten(1)
+        z = self.source_proj(z)
+        out = dict(feats)
+        for stage_name in self.targets:
+            feat = feats[stage_name]
+            calib = self.target_mlps[stage_name](z).unsqueeze(-1).unsqueeze(-1)
+            out[stage_name] = feat + self._gate(stage_name) * calib * feat
+        return out
 
 
 class DMGFusion(nn.Module):

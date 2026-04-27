@@ -15,6 +15,7 @@ dual_stream: true
 cmg_stages: []             # 无 CMG（Exp-8d 已证明冗余）
 cma_stages: []             # 无旧式单向 CMA
 bidir_cma_stages: [p5]     # BidirCrossModalA2C2f 接管 P5 层
+bidir_attn_dropout: 0.1    # attention 输出投影后的 dropout
 p2_fusion: dmg             # DMGFusion v1@P2
 
 scales:
