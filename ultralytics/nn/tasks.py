@@ -706,17 +706,20 @@ class DualStreamDetectionModel(DetectionModel):
         """
         feats_rgb, feats_ir = {}, {}
         y_rgb, y_ir = [], []
+        bidir_layer_to_stage = getattr(self, "_bidir_layer_to_stage", {})
+        bidir_cma_modules = getattr(self, "_bidir_cma_modules", {})
+        cma_layer_to_stage = getattr(self, "_cma_layer_to_stage", {})
         for m_rgb, m_ir in zip(self.backbone_rgb, self.backbone_ir):
             layer_idx = m_rgb.i
             if m_rgb.f != -1:
                 x_rgb = y_rgb[m_rgb.f] if isinstance(m_rgb.f, int) else [x_rgb if j == -1 else y_rgb[j] for j in m_rgb.f]
             if m_ir.f != -1:
                 x_ir = y_ir[m_ir.f] if isinstance(m_ir.f, int) else [x_ir if j == -1 else y_ir[j] for j in m_ir.f]
-            if layer_idx in self._bidir_layer_to_stage:
+            if layer_idx in bidir_layer_to_stage:
                 # BidirCrossModalA2C2f：joint token 线性双向 cross-attn，单次前向输出两路
-                stage_name = self._bidir_layer_to_stage[layer_idx]
-                x_rgb, x_ir = self._bidir_cma_modules[stage_name](x_rgb, x_ir)
-            elif layer_idx in self._cma_layer_to_stage:
+                stage_name = bidir_layer_to_stage[layer_idx]
+                x_rgb, x_ir = bidir_cma_modules[stage_name](x_rgb, x_ir)
+            elif layer_idx in cma_layer_to_stage:
                 # 原 CrossModalA2C2f：两套独立权重，各自以对方输入为 KV
                 x_rgb_new = m_rgb(x_rgb, x_ir)
                 x_ir_new  = m_ir(x_ir,  x_rgb)
@@ -735,11 +738,12 @@ class DualStreamDetectionModel(DetectionModel):
     def adapter_debug_state(self):
         """Collect scalar debug variables from residual-gated bidir adapters."""
         debug = {}
-        for stage_name, module in self._bidir_adapter_modules.items():
+        for stage_name, module in getattr(self, "_bidir_adapter_modules", {}).items():
             for key, value in module.debug_state().items():
                 debug[f"adapter/{stage_name}_{key}"] = value
-        if self._sgmc_module is not None:
-            for key, value in self._sgmc_module.debug_state().items():
+        sgmc_module = getattr(self, "_sgmc_module", None)
+        if sgmc_module is not None:
+            for key, value in sgmc_module.debug_state().items():
                 debug[f"sgmc/{key}"] = value
         return debug
 
@@ -753,16 +757,16 @@ class DualStreamDetectionModel(DetectionModel):
         feats_rgb, feats_ir = self._forward_both_backbones(x_rgb, x_ir)
 
         # Residual-gated bidir adapters：只做受控补充，不替换主路径
-        for stage_name, module in self._bidir_adapter_modules.items():
+        for stage_name, module in getattr(self, "_bidir_adapter_modules", {}).items():
             feats_rgb[stage_name], feats_ir[stage_name] = module(feats_rgb[stage_name], feats_ir[stage_name])
 
         # 辅助检测头（训练专用，pre-CMG 纯 backbone 特征，强制 RGB/IR 各自保留目标语义）
-        if self.training and self.use_aux_head:
+        if self.training and getattr(self, "use_aux_head", True):
             self._aux_rgb = self.aux_head_rgb([feats_rgb["p3"]])
             self._aux_ir  = self.aux_head_ir([feats_ir["p3"]])
 
         # 跨模态门控（Exp-1 无 CMG，此循环为空）
-        for stage_name in self._cmg_stages:
+        for stage_name in getattr(self, "_cmg_stages", ()):
             cmg = self.cmg_modules[stage_name]
             rgb_f = feats_rgb[stage_name]
             ir_f  = feats_ir[stage_name]
@@ -775,8 +779,9 @@ class DualStreamDetectionModel(DetectionModel):
             r, i = feats_rgb[stage_name], feats_ir[stage_name]
             fc = self.fusion_convs[stage_name]
             fused[stage_name] = fc(r, i) if isinstance(fc, (DMGFusion, DMGFusionV2)) else fc(torch.cat([r, i], dim=1))
-        if self._sgmc_module is not None:
-            fused = self._sgmc_module(fused)
+        sgmc_module = getattr(self, "_sgmc_module", None)
+        if sgmc_module is not None:
+            fused = sgmc_module(fused)
 
         # 构造 y 列表供 head 使用跳连索引
         y = [None] * (max(self.FUSION_LAYER_INDICES.values()) + 1)

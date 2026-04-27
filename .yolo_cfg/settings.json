@@ -1,0 +1,20 @@
+{
+  "settings_version": "0.0.6",
+  "datasets_dir": "E:\\Yan-Unifiles\\lab\\exp\\datasets",
+  "weights_dir": "E:\\Yan-Unifiles\\lab\\exp\\yolov12\\weights",
+  "runs_dir": "E:\\Yan-Unifiles\\lab\\exp\\yolov12\\runs",
+  "uuid": "6cf19243b1177dcea0d3a8bf34f0cec68e2aed233c5f538a0c73fe89d000271a",
+  "sync": true,
+  "api_key": "",
+  "openai_api_key": "",
+  "clearml": true,
+  "comet": true,
+  "dvc": true,
+  "hub": true,
+  "mlflow": true,
+  "neptune": true,
+  "raytune": true,
+  "tensorboard": true,
+  "wandb": false,
+  "vscode_msg": true
+}
