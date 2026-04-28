@@ -3,17 +3,44 @@
 import sys
 from unittest import mock
 
+import pytest
+
 from tests import MODEL
 from ultralytics import YOLO
 from ultralytics.cfg import get_cfg
 from ultralytics.engine.exporter import Exporter
 from ultralytics.models.yolo import classify, detect, segment
+from ultralytics.models.yolo.detect.val import DetectionValidator
 from ultralytics.utils import ASSETS, DEFAULT_CFG, WEIGHTS_DIR
 
 
 def test_func(*args):  # noqa
     """Test function callback for evaluating YOLO model performance metrics."""
     print("callback test passed")
+
+
+def test_detection_validator_reports_per_class_box_metrics():
+    """Test per-class detection metrics are exposed for results.csv logging."""
+
+    class DummyMetrics:
+        ap_class_index = [0, 2]
+
+        def class_result(self, i):
+            return [(0.1, 0.2, 0.3, 0.4), (0.5, 0.6, 0.7, 0.8)][i]
+
+    validator = DetectionValidator.__new__(DetectionValidator)
+    validator.names = {0: "smoke", 1: "fire", 2: "person"}
+    validator.metrics = DummyMetrics()
+
+    metrics = validator._per_class_results_dict()
+
+    assert metrics["metrics/smoke/precision(B)"] == pytest.approx(0.1)
+    assert metrics["metrics/smoke/recall(B)"] == pytest.approx(0.2)
+    assert metrics["metrics/smoke/mAP50(B)"] == pytest.approx(0.3)
+    assert metrics["metrics/smoke/mAP50-95(B)"] == pytest.approx(0.4)
+    assert metrics["metrics/fire/precision(B)"] == 0.0
+    assert metrics["metrics/person/precision(B)"] == pytest.approx(0.5)
+    assert metrics["metrics/person/mAP50-95(B)"] == pytest.approx(0.8)
 
 
 def test_export():

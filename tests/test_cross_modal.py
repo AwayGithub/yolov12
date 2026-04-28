@@ -208,3 +208,31 @@ def test_dual_stream_p2_sgmc_forward_and_debug_state():
     assert "sgmc/p3_gate" in debug
     assert "sgmc/p4_gate" in debug
     assert "sgmc/p5_gate" in debug
+
+
+@pytest.mark.parametrize(
+    ("cfg", "expected_p4_module", "uses_aux_head"),
+    (
+        ("yolov12-dual-p2-plain-a2c2fp4-noaux.yaml", "A2C2f", False),
+        ("yolov12-dual-p2-plain-a2c2fp4-p3aux.yaml", "A2C2f", True),
+        ("yolov12-dual-p2-plain-c3k2p4-noaux.yaml", "C3k2", False),
+    ),
+)
+def test_plain_p2_fair_ablation_cfgs_instantiate_expected_models(cfg, expected_p4_module, uses_aux_head):
+    """Fair plainP2 ablation YAMLs instantiate the expected P2 fusion and P4 block."""
+    from ultralytics.nn.modules.conv import Conv
+    from ultralytics.nn.tasks import DualStreamDetectionModel
+
+    model = DualStreamDetectionModel(cfg, nc=3, verbose=False)
+
+    assert model.yaml["p2_fusion"] == "plain"
+    assert model.yaml["backbone"][6][2] == expected_p4_module
+    assert type(model.backbone_rgb[6]).__name__ == expected_p4_module
+    assert type(model.backbone_ir[6]).__name__ == expected_p4_module
+    assert isinstance(model.fusion_convs["p2"], Conv)
+    assert not any(type(m).__name__ == "DMGFusion" for m in model.modules())
+
+    if uses_aux_head:
+        assert "noaux" not in cfg
+    else:
+        assert "noaux" in cfg

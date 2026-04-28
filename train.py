@@ -220,7 +220,12 @@ if __name__ == "__main__":
             # Re-sync trainer.metrics so val-loss columns match new loss_names (5 vs 3).
             # Without this, save_metrics writes 5 train cols but only 3 val cols,
             # creating a CSV header/row column count mismatch on validation epochs.
-            metric_keys = trainer.validator.metrics.keys + trainer.label_loss_items(prefix="val")
+            metric_keys = (
+                trainer.validator.results_csv_keys()
+                if hasattr(trainer.validator, "results_csv_keys")
+                else trainer.validator.metrics.keys
+            )
+            metric_keys += trainer.label_loss_items(prefix="val")
             trainer.metrics = dict(zip(metric_keys, [0] * len(metric_keys)))
 
     model.add_callback("on_train_start", _set_aux_weight)
