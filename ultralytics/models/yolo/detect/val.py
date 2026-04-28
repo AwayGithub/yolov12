@@ -195,7 +195,61 @@ class DetectionValidator(BaseValidator):
         stats.pop("target_img", None)
         if len(stats) and stats["tp"].any():
             self.metrics.process(**stats)
-        return self.metrics.results_dict
+        return {**self.metrics.results_dict, **self._per_class_results_dict()}
+
+    @staticmethod
+    def _clean_metric_class_name(name):
+        """Return a CSV-safe class name for metric keys."""
+        name = str(name).strip()
+        cleaned = "".join(c if c.isalnum() or c in "._-" else "_" for c in name)
+        return cleaned or "class"
+
+    def _metric_class_names(self):
+        """Return class names before or after validator metric initialization."""
+        names = self.names
+        if names is None and isinstance(getattr(self, "data", None), dict):
+            names = self.data.get("names")
+        args_data = getattr(getattr(self, "args", None), "data", None)
+        if names is None and isinstance(args_data, dict):
+            names = args_data.get("names")
+        if names is None:
+            return []
+        return names.items() if isinstance(names, dict) else enumerate(names)
+
+    def _per_class_metric_keys(self):
+        """Return stable per-class metric keys used in training results.csv."""
+        keys = []
+        for _, name in self._metric_class_names():
+            prefix = f"metrics/{self._clean_metric_class_name(name)}"
+            keys.extend(
+                (
+                    f"{prefix}/precision(B)",
+                    f"{prefix}/recall(B)",
+                    f"{prefix}/mAP50(B)",
+                    f"{prefix}/mAP50-95(B)",
+                )
+            )
+        return keys
+
+    def _per_class_results_dict(self):
+        """Return per-class P/R/mAP50/mAP50-95 metrics for CSV logging."""
+        values_by_class = {}
+        for i, c in enumerate(getattr(self.metrics, "ap_class_index", [])):
+            values_by_class[int(c)] = self.metrics.class_result(i)
+
+        results = {}
+        for c, name in self._metric_class_names():
+            prefix = f"metrics/{self._clean_metric_class_name(name)}"
+            p, r, map50, map95 = values_by_class.get(int(c), (0.0, 0.0, 0.0, 0.0))
+            results[f"{prefix}/precision(B)"] = float(p)
+            results[f"{prefix}/recall(B)"] = float(r)
+            results[f"{prefix}/mAP50(B)"] = float(map50)
+            results[f"{prefix}/mAP50-95(B)"] = float(map95)
+        return results
+
+    def results_csv_keys(self):
+        """Return aggregate and per-class metric keys for stable training CSV headers."""
+        return self.metrics.keys + self._per_class_metric_keys()
 
     def print_results(self):
         """Prints training/validation set metrics per class."""

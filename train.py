@@ -1,6 +1,9 @@
-from ultralytics import YOLO
-from ultralytics.utils import yaml_load
 import argparse
+import shutil
+from pathlib import Path
+
+from ultralytics import YOLO
+from ultralytics.utils import yaml_load, yaml_save
 
 
 def parse_args():
@@ -64,6 +67,46 @@ def parse_args():
         help="每个 epoch 打印前 N 个 step 的梯度范数（默认 10）",
     )
     return parser.parse_args()
+
+
+def _resolve_model_cfg_path(cfg):
+    """Resolve a model YAML path from an absolute path, relative path, or Ultralytics model config name."""
+    if not cfg:
+        return None
+    cfg_path = Path(cfg)
+    if cfg_path.is_file():
+        return cfg_path
+    local_path = Path.cwd() / cfg
+    if local_path.is_file():
+        return local_path
+    matches = sorted((Path.cwd() / "ultralytics" / "cfg" / "models").rglob(cfg_path.name))
+    return matches[0] if matches else None
+
+
+def _copy_training_sources(trainer, train_script_path, cfg_path):
+    """Copy train.py and the active model config into the run directory for reproducibility."""
+    snapshot_dir = Path(trainer.save_dir) / "source_snapshot"
+    snapshot_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        shutil.copy2(train_script_path, snapshot_dir / Path(train_script_path).name)
+    except OSError as e:
+        print(f"[source-snapshot] WARNING: failed to copy train.py: {e}")
+
+    if cfg_path is not None:
+        try:
+            shutil.copy2(cfg_path, snapshot_dir / Path(cfg_path).name)
+        except OSError as e:
+            print(f"[source-snapshot] WARNING: failed to copy cfg {cfg_path}: {e}")
+
+    model_yaml = getattr(trainer.model, "yaml", None)
+    if model_yaml is not None:
+        try:
+            yaml_save(snapshot_dir / "model_yaml.yaml", model_yaml)
+        except Exception as e:
+            print(f"[source-snapshot] WARNING: failed to save model_yaml.yaml: {e}")
+
+    print(f"[source-snapshot] Saved train.py and model cfg snapshot to {snapshot_dir}")
 
 
 # ---------------------------------------------------------------------------
@@ -139,13 +182,18 @@ if __name__ == "__main__":
     data_cfg = yaml_load("ultralytics/cfg/datasets/RGBT-3M.yaml")
     data_cfg["input_mode"] = args.input_mode
 
+    train_script_path = Path(__file__).resolve()
+    cfg_for_snapshot = None
     if args.resume:
         model = YOLO(args.resume)
     elif args.cfg:
+        cfg_for_snapshot = _resolve_model_cfg_path(args.cfg)
         model = YOLO(args.cfg)
     elif args.fusion_stage == "middle" and args.input_mode == "dual_input":
+        cfg_for_snapshot = _resolve_model_cfg_path("yolov12-dual.yaml")
         model = YOLO("yolov12-dual.yaml")  # 双分支中期融合，n scale
     else:
+        cfg_for_snapshot = _resolve_model_cfg_path("yolov12.yaml")
         model = YOLO("yolov12.yaml")       # 单分支（early fusion 或单模态）
 
     # 在训练开始前把 aux_loss_weight 写入模型（init_criterion 懒初始化，此时 model.args 已就绪）
@@ -172,11 +220,20 @@ if __name__ == "__main__":
             # Re-sync trainer.metrics so val-loss columns match new loss_names (5 vs 3).
             # Without this, save_metrics writes 5 train cols but only 3 val cols,
             # creating a CSV header/row column count mismatch on validation epochs.
-            metric_keys = trainer.validator.metrics.keys + trainer.label_loss_items(prefix="val")
+            metric_keys = (
+                trainer.validator.results_csv_keys()
+                if hasattr(trainer.validator, "results_csv_keys")
+                else trainer.validator.metrics.keys
+            )
+            metric_keys += trainer.label_loss_items(prefix="val")
             trainer.metrics = dict(zip(metric_keys, [0] * len(metric_keys)))
 
     model.add_callback("on_train_start", _set_aux_weight)
     model.add_callback("on_train_start", _patch_loss_names)
+    model.add_callback(
+        "on_train_start",
+        lambda trainer: _copy_training_sources(trainer, train_script_path, cfg_for_snapshot),
+    )
 
     if args.grad_debug:
         # 将参数附到 trainer 上，供 callback 读取
@@ -198,6 +255,8 @@ if __name__ == "__main__":
         batch=16,
         workers=0,
         device=0,
+        seed=0,
+        deterministic=True,
         optimizer="SGD",
         lr0=0.01,
         lrf=0.01,
