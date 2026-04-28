@@ -1,6 +1,6 @@
 # ADR-002: 极简双流基线 + DMGFusion@P2
 
-**Status:** 🔒 Exp-8d (mAP50-95=0.644) 冻结为主方案；BidirLiCMA@P5 作为后续探索单独记录，不改变主结论。
+**Status:** 🔒 Exp-8d (mAP50-95=0.644) 冻结为主方案；BidirLiCMA@P5 / Adapter@P5 四组探索**已完结，方向关闭**，不改变主结论。
 **Date:** 2026-04-20 / **Updated:** 2026-04-27
 **Related:** [ADR-001](ADR-001-dual-stream-yolov12-mf.md)（历史档案，含 Exp-0~Exp-8 全量数据与诊断）
 
@@ -263,82 +263,121 @@ fused ≈ (1 + 2.42 · S) ⊙ (w_r ⊙ R + w_i ⊙ I) − 0.10 · (R+I) + out_pr
 
 ---
 
-## 四、后续探索：BidirLiCMA@P5（2026-04-23）
+## 四、P5 跨模态注意力探索：BidirLiCMA 系列（2026-04-23 ~ 2026-04-27，已完结）
 
-### 4.1 当前问题
+### 4.1 探索动机
 
-在 Exp-8d 冻结后，当前探索方向是将 P5 层级的原始 A2C2f 替换为 **BidirLinearCrossAttn / BidirCrossModalA2C2f**，即在最高语义层用 joint token 方式对 RGB/IR 做双向线性跨模态注意力。实验目标是验证：在 DMGFusion@P2 已经建立低层差分融合后，P5 是否还能通过全局跨模态语义交互带来额外增益。
+Exp-8d 冻结后的核心开放问题：在 DMGFusion 已于 P2 层完成低层差分融合的情况下，**P5 最高语义层是否还能从双向跨模态注意力中获得额外增益？**
 
-当前代码路径：
+验证两种接入策略：
 
-- `ultralytics/nn/modules/block.py::BidirLinearCrossAttnBlock`
-- `ultralytics/nn/modules/block.py::BidirCrossModalA2C2f`
-- `ultralytics/nn/tasks.py::DualStreamDetectionModel` 中 `bidir_cma_stages: [p5]`
+- **替换策略**（BidirLiCMA@P5）：用 `BidirCrossModalA2C2f` 直接替换原双流 P5 A2C2f，以 joint token 方式做双向线性跨模态注意力（`bidir_cma_stages: [p5]`）；
+- **残差策略**（Adapter@P5）：保留原 P5 A2C2f 主路径，仅追加 `ResidualGatedBidirLiCMAAdapter` 注入受控残差修正（`bidir_adapter_stages: [p5]`）。
 
-实现细节上，`bidir_cma_stages` 会将 RGB/IR 两条 backbone 的 P5 原模块替换为 `Identity`，再由单个 `BidirCrossModalA2C2f` 同时输出两路 P5 特征。这意味着当前实验不是“在原 P5 后追加轻量 residual cross-modal adapter”，而是“用 BidirLiCMA 接管/替换 P5 表征学习”。
+相关代码路径：
 
-### 4.2 训练曲线证据
+- `block.py::BidirLinearCrossAttnBlock` — joint token（RGB+IR → 2N）+ ELU+1 线性注意力 + DWConv bypass
+- `block.py::BidirCrossModalA2C2f` — 替换策略的 A2C2f 级封装
+- `block.py::ResidualGatedBidirLiCMAAdapter` — 残差策略（gate_limit tanh 上限 + zero-init cv2）
+- `tasks.py::DualStreamDetectionModel._forward_both_backbones` / `._predict_once`
 
-三条本地 CSV 对比：
+### 4.2 实验配置
 
-| 实验 | CSV | best epoch | best P | best R | best mAP50 | best mAP50-95 | last mAP50-95 |
-|------|-----|-----------:|-------:|-------:|-----------:|--------------:|--------------:|
-| Exp-8d 主基线（无 Bidir） | `runs/detect/RGBT-3M/dual_MF_DMGFusionP2_P2345_P4C3k2_P3aux/results.csv` | 195 | 0.9340 | 0.8999 | 0.9423 | **0.6436** | 0.6434 |
-| + BidirLiCMA@P5 | `runs/detect/RGBT-3M/trying/dual_MF_DMGFusionP2_BidirLiCMAP5_P2345_P4C3k2_P3aux-FAIL/results.csv` | 130 | 0.9304 | 0.9059 | 0.9400 | **0.6322** | 0.6322 |
-| + BidirLiCMA@P5 + dropout=0.1 | `runs/detect/RGBT-3M/trying/dual_MF_DMGFusionP2_BidirLiCMAP5+dropout0.1_P2345_P4C3k2_P3aux-FAIL/results.csv` | 177 | 0.9357 | 0.8974 | 0.9396 | **0.6375** | 0.6369 |
+| 实验 | 接入方式 | 额外超参 | Layers | Params | 推理速度 |
+|------|---------|---------|-------:|-------:|-------:|
+| **Exp-8d 基线** | 无 | — | 696 | 4.36M | 9.25ms |
+| Bidir（无 dropout） | 替换 P5 A2C2f | — | 625 | 3.95M | 5.33ms |
+| Bidir + dp=0.1 | 替换 P5 A2C2f | attn_dropout=0.1 | 625 | 3.95M | 5.55ms |
+| Bidir + dp=0.2 | 替换 P5 A2C2f | attn_dropout=0.2 | 626 | 3.95M | 7.23ms |
+| Adapter | 残差旁路（保留 A2C2f） | ratio=0.5, gate_limit=0.1, init_gate=0.001 | 727 | 4.56M | 8.68ms |
 
-关键中期对照：
+BidirLiCMA 模块（在 P5 处 C=64, nh=2, hd=32）参数约 17.8K；Adapter 模块（256→128→256, 4 heads）参数约 460K（含 cv1/cv2）。
 
-| epoch | 实验 | train loss sum | val loss sum | mAP50-95 | 相对 Exp-8d |
-|------:|------|---------------:|-------------:|---------:|------------:|
-| 75 | Exp-8d | 1.979 | 3.270 | 0.6340 | 0 |
-| 75 | Bidir | 1.807 | 3.410 | 0.6274 | -0.0066 |
-| 75 | Bidir+dropout | 1.782 | 3.359 | 0.6306 | -0.0034 |
-| 100 | Exp-8d | 1.807 | 3.328 | 0.6376 | 0 |
-| 100 | Bidir | 1.604 | 3.491 | 0.6306 | -0.0070 |
-| 100 | Bidir+dropout | 1.571 | 3.432 | 0.6331 | -0.0046 |
-| 125 | Exp-8d | 1.675 | 3.368 | 0.6395 | 0 |
-| 125 | Bidir | 1.443 | 3.548 | 0.6314 | -0.0081 |
-| 125 | Bidir+dropout | 1.416 | 3.475 | 0.6358 | -0.0037 |
+### 4.3 训练动态（中期对照）
 
-### 4.3 初步判断
+Bidir 系列自始至终呈现**训练 loss 更低、验证 loss 更高**的过拟合特征；dropout 有缓解但无法追平基线。
 
-当前结果有明确过拟合/泛化差迹象：Bidir 版本训练 loss 更低，但验证 loss 更高，mAP50-95 长期落后 Exp-8d。dropout=0.1 能缓解（0.6322 -> 0.6375），但没有追平无 Bidir 的 0.6436。
+| Epoch | 实验 | train loss | val loss | mAP50-95 | Δ vs 基线 |
+|------:|------|----------:|---------:|---------:|----------:|
+| 75 | Exp-8d | 1.979 | 3.270 | 0.6340 | — |
+| 75 | Bidir | 1.807 | 3.410 | 0.6274 | −0.0066 |
+| 75 | Bidir+dp0.1 | 1.782 | 3.359 | 0.6306 | −0.0034 |
+| 100 | Exp-8d | 1.807 | 3.328 | 0.6376 | — |
+| 100 | Bidir | 1.604 | 3.491 | 0.6306 | −0.0070 |
+| 100 | Bidir+dp0.1 | 1.571 | 3.432 | 0.6331 | −0.0046 |
+| 125 | Exp-8d | 1.675 | 3.368 | 0.6395 | — |
+| 125 | Bidir | 1.443 | 3.548 | 0.6314 | −0.0081 |
+| 125 | Bidir+dp0.1 | 1.416 | 3.475 | 0.6358 | −0.0037 |
 
-需要特别区分两种可能根因：
+### 4.4 验证集最终结果（best weights）
 
-1. **容量过强导致过拟合。** BidirLiCMA 在 P5 引入 joint token QKV、LayerNorm、type embedding、DWConv bypass，训练集拟合速度明显更快。
-2. **替换式接管破坏原 P5 表征。** 当前实现用 `Identity` 替换原 RGB/IR P5 A2C2f，再由 `BidirCrossModalA2C2f` 输出两路特征；它测试的是“替换 P5 是否有效”，而不是“跨模态 residual 增量是否有效”。即使 attention `out_proj` 零初始化，DWConv bypass 仍非零初始化，因此起点并不等价于原 P5 A2C2f。
+训练目录：`runs/detect/RGBT-3M/trying/`
 
-### 4.4 下一步决策
+#### 汇总
 
-先不改代码。下一步先对三组 best 权重做同一口径 per-class validation，确认 Bidir 失败发生在哪些类别：
+| 实验 | best epoch | mAP50 | mAP50-95 | Δ mAP50-95 |
+|------|----------:|------:|---------:|-----------:|
+| **Exp-8d 基线** | 195 | **0.942** | **0.644** | — |
+| Bidir（无 dropout） | 130 | 0.940 | 0.632 | −0.012 |
+| Bidir + dp=0.1 | 177 | 0.940 | 0.637 | −0.007 |
+| Bidir + dp=0.2 | — | 0.939 | 0.636 | −0.008 |
+| Adapter | — | 0.941 | 0.638 | −0.006 |
 
-```powershell
-python val.py --weights runs\detect\RGBT-3M\dual_MF_DMGFusionP2_P2345_P4C3k2_P3aux\epoch195.pt --input_mode dual_input --batch 4 --device 0
+#### 分类别（mAP50 / mAP50-95）
+
+| Class | 基线 | Bidir | Bidir+dp0.1 | Bidir+dp0.2 | Adapter |
+|-------|------|-------|-------------|-------------|---------|
+| **all** | 0.942 / **0.644** | 0.940 / 0.632 | 0.940 / 0.637 | 0.939 / 0.636 | 0.941 / 0.638 |
+| smoke | **0.942** / **0.741** | 0.939 / 0.728 | 0.935 / 0.731 | 0.936 / 0.729 | 0.938 / 0.734 |
+| fire | **0.949** / **0.599** | 0.943 / 0.585 | 0.945 / 0.591 | 0.944 / 0.592 | 0.945 / 0.590 |
+| person | 0.935 / 0.593 | **0.939** / 0.582 | **0.939** / **0.589** | 0.936 / 0.588 | 0.938 / 0.588 |
+
+**三类 mAP50-95 全部下降**，判定口径触发”停止该方向”条件。最大跌幅：smoke（−0.010 ~ −0.013）、fire（−0.007 ~ −0.014）。Person mAP50 在 Bidir 无 dropout 与 dp=0.1 版本中略高于基线（0.939 vs 0.935），但被其他类损失完全抵消。
+
+### 4.5 根因分析
+
+#### (a) 替换策略的结构性问题
+
+`bidir_cma_stages` 将原双流 P5 A2C2f 替换为 `Identity`，BidirCrossModalA2C2f 需要**从零重建 P5 的语义判别能力**。这带来三个问题：
+
+1. **冷启动代价**：原 A2C2f 有经过 ImageNet 预训练初始化的 strip-free 自注意力，BidirLiCMA 的 DWConv bypass 非零初始化，起点并不等价；
+2. **收敛慢**：ELU+1 linear attention 在有限 epoch 内比 softmax attention 收敛更慢，最优 epoch 从 195 提前到 130，说明 BidirLiCMA 更容易早期过拟合后退化；
+3. **fire 跌幅最大**：fire 在 P5 特征图上目标更大、高级语义更丰富，是原 A2C2f 全局自注意力最擅长的场景，替换后损失最重（mAP50-95 −0.014）。
+
+#### (b) Adapter 残差策略的内在矛盾
+
+Adapter 的设计出发点是”保守注入，不扰动基线”，但三重约束组合使其实际上几乎无法激活：
+
+```
+output = x_p5 + gate_limit × tanh(γ) × cv2(block(cv1(x_p5)))
+       = x_p5 + 0.1 × tanh(γ) × delta
 ```
 
-```powershell
-python val.py --weights runs\detect\RGBT-3M\trying\dual_MF_DMGFusionP2_BidirLiCMAP5_P2345_P4C3k2_P3aux-FAIL\weights\best.pt --input_mode dual_input --batch 4 --device 0
-```
+- `cv2.weight = 0`（零初始化） → delta ≈ 0 → ∂L/∂γ ≈ 0，训练初期 γ 几乎无梯度；
+- `gate_limit = 0.1` → 即使完全激活，最大贡献为 0.1 × |delta|；
+- Adapter 插在 A2C2f **之后**，P5 特征已经历完整自注意力，跨模态残差注入时序过晚。
 
-```powershell
-python val.py --weights runs\detect\RGBT-3M\trying\dual_MF_DMGFusionP2_BidirLiCMAP5+dropout0.1_P2345_P4C3k2_P3aux-FAIL\weights\best.pt --input_mode dual_input --batch 4 --device 0
-```
+结果：Adapter 是五个变体中 mAP50-95 最接近基线的（0.638），但仍落后，且参数最多（4.56M）、速度优势最小（8.68ms vs 9.25ms），是成本与收益最差的配置。
 
-判定口径：
+#### (c) P5 跨模态注意力的根本局限
 
-- 三类全部下降：停止“替换式 BidirLiCMA@P5”方向。
-- fire/person 上升、smoke 下降：保留探索价值，改为 P5 residual adapter。
-- recall 上升但 mAP50-95 下降：说明跨模态语义可能增加召回但损害定位质量，后续应弱化 residual 或限制作用路径。
-- dropout 版分类别明显接近 Exp-8d：说明正则化方向有效，再考虑 residual + drop-path。
+四组实验一致指向同一结论：**P5 层不需要跨模态注意力**。
 
-若 per-class 结果支持继续，下一版代码不再替换 P5，而是保留原 P5 A2C2f，并添加零初始化残差：
+- P5（stride=32，15×20 spatial）是最高语义层，各模态 A2C2f 自注意力已将单流特征压缩为 class-discriminative embedding；
+- DMGFusion@P2 在低层已完成差分融合与模态路由，P5 fused 输出本已包含跨模态信号；
+- 在此基础上追加全局跨模态注意力，既无法提供新信息，又引入额外参数和训练难度。
 
-```text
-x_rgb = p5_rgb_original + gamma * delta_rgb
-x_ir  = p5_ir_original  + gamma * delta_ir
-gamma = 0 at init
-```
+Person 类的轻微例外（mAP50 +0.004）说明跨模态语义对小目标检测有边际帮助，但量级不足以被选为设计方向。
 
-并优先测试更小容量配置（如 `n=1` 或 `e=0.25`）与对最终 delta 的 dropout/drop-path，而不是只在 attention projection 后 dropout。
+### 4.6 结论与决策
+
+**P5 跨模态注意力方向关闭。** 两种接入策略（替换 / 残差旁路）均未能在任意类别的 mAP50-95 上超越 Exp-8d 基线。
+
+| 判据 | 结果 |
+|------|------|
+| 三类 mAP50-95 全部下降 | ✓ |
+| 最优 Bidir 变体（dp=0.1） | mAP50-95 0.637，差基线 −0.007 |
+| 最优残差变体（Adapter） | mAP50-95 0.638，差基线 −0.006，参数最多 |
+| 可用的 trade-off | Bidir+dp=0.1：5.55ms 推理，比基线快 40%，mAP50-95 −0.007 |
+
+**若后续需要轻量化推理**（部署场景），Bidir+dp=0.1（3.95M params / 5.55ms / mAP50-95=0.637）可作为精度换速度的备选方案；精度优先场景维持 Exp-8d 为主方案。
