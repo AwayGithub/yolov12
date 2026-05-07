@@ -7,3 +7,4 @@ CLAUDE.md
 tools/
 .vscode/
 tmp/
+.yolo_test_config
