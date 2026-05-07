@@ -16,5 +16,16 @@ file	status	url
 2025_TNNLS_TFDet.pdf	OK	https://arxiv.org/pdf/2305.16580
 2024_TGRS_C2Former.pdf	OK	https://arxiv.org/pdf/2306.16175
 2023_TITS_CMX.pdf	OK	https://arxiv.org/pdf/2203.04838
+2025_ICCV_WaveMamba.pdf	OK	https://openaccess.thecvf.com/content/ICCV2025/papers/Zhu_WaveMamba_Wavelet-Driven_Mamba_Fusion_for_RGB-Infrared_Object_Detection_ICCV_2025_paper.pdf
+2025_ICCV_M2D_LIF.pdf	OK	https://openaccess.thecvf.com/content/ICCV2025/papers/Zhao_Rethinking_Multi-modal_Object_Detection_from_the_Perspective_of_Mono-Modality_Feature_ICCV_2025_paper.pdf
+2025_CVPR_PFGF.pdf	OK	https://openaccess.thecvf.com/content/CVPR2025/papers/Li_Pseudo_Visible_Feature_Fine-Grained_Fusion_for_Thermal_Object_Detection_CVPR_2025_paper.pdf
+2025_ICCV_PCDF_ATR_UMOD.pdf	OK	https://arxiv.org/pdf/2510.13620
+2025_CVPR_MUST_UNTrack.pdf	OK	https://openaccess.thecvf.com/content/CVPR2025/papers/Qin_MUST_The_First_Dataset_and_Unified_Framework_for_Multispectral_UAV_CVPR_2025_paper.pdf
+2022_ECCV_TSRA_TSFADet.pdf	OK	https://www.ecva.net/papers/eccv_2022/papers_ECCV/papers/136690501.pdf
+2022_AAAI_MArMOT.pdf	OK	https://cdn.aaai.org/ojs/20016/20016-13-24029-1-2-20220628.pdf
+2025_AAAI_AINet_ProgressiveFusionMamba.pdf	OK	https://arxiv.org/pdf/2408.08827
+2025_AAAI_CAFormer_RGBT_Tracking.pdf	OK	https://arxiv.org/pdf/2408.02222
 2023_ACMMM_CALNet.pdf	FAIL_ACM_403	https://dl.acm.org/doi/pdf/10.1145/3581783.3612651
 2022_AAAI_APFNet_RGBT_Tracking.pdf	FAIL_AAAI_503	https://ojs.aaai.org/index.php/AAAI/article/view/20187/19946
+2024_AAAI_BAT.pdf	FAIL_AAAI_503	https://ojs.aaai.org/index.php/AAAI/article/view/27852/27730
+2024_AAAI_TATrack.pdf	FAIL_AAAI_503	https://ojs.aaai.org/index.php/AAAI/article/view/28352/28690
