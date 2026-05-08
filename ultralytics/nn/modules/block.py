@@ -52,6 +52,10 @@ __all__ = (
     "SCDown",
     "TorchVision",
     "DMGFusion",
+    "DMGFusionPosAlpha",
+    "DMGFusionInit8d",
+    "DMGFusionINSigmoid",
+    "DMGFusionV2",
     "SemanticGuidedMultiScaleCalibration",
 )
 
@@ -1870,6 +1874,124 @@ class DMGFusion(nn.Module):
         w_rgb, w_ir = W[:, 0:1], W[:, 1:2]                                       # (B, 1, H, W) each
         S = torch.sigmoid(self.diff_enc(D))                                       # (B, C, H, W)
         modal_selected = w_rgb * x_rgb + w_ir * x_ir                             # (B, C, H, W)
+        fused = (1.0 + self.alpha * S) * modal_selected + self.beta * 0.5 * (x_rgb + x_ir)
+        return self.out_proj(fused)
+
+
+class DMGFusionPosAlpha(nn.Module):
+    """DMGFusion v1 variant with bounded non-negative differential gain.
+
+    This keeps the original DMGFusion formula but parameterises alpha as
+    alpha_max * sigmoid(alpha_raw), preventing the module from learning a
+    negative differential scale that suppresses high-disagreement regions.
+    """
+
+    def __init__(
+        self,
+        channels: int,
+        diff_hidden_ratio: float = 0.25,
+        alpha_max: float = 3.0,
+        alpha_init: float = 1.0,
+        beta_init: float = 1.0,
+    ):
+        """Initialise DMGFusion with alpha constrained to [0, alpha_max]."""
+        super().__init__()
+        if alpha_max <= 0:
+            raise ValueError("alpha_max must be positive.")
+        if not 0 <= alpha_init <= alpha_max:
+            raise ValueError("alpha_init must satisfy 0 <= alpha_init <= alpha_max.")
+
+        c_diff = max(8, int(channels * diff_hidden_ratio))
+        self.sel = nn.Sequential(
+            Conv(channels * 3, c_diff, 1),
+            Conv(c_diff, c_diff, 3, g=c_diff),
+            nn.Conv2d(c_diff, 2, 1, bias=True),
+        )
+        self.diff_enc = nn.Sequential(
+            Conv(channels, c_diff, 1),
+            nn.Conv2d(c_diff, channels, 1, bias=True),
+        )
+        alpha_ratio = min(max(alpha_init / alpha_max, 1e-6), 1.0 - 1e-6)
+        self.alpha_max = float(alpha_max)
+        self.alpha_raw = nn.Parameter(torch.tensor(math.log(alpha_ratio / (1.0 - alpha_ratio))))
+        self.beta = nn.Parameter(torch.tensor(float(beta_init)))
+        self.out_proj = Conv(channels, channels, 1, act=False)
+
+    @property
+    def alpha(self):
+        """Return bounded non-negative alpha as a tensor for logging/checkpoint diagnostics."""
+        return self.alpha_max * torch.sigmoid(self.alpha_raw)
+
+    def forward(self, x_rgb, x_ir):
+        """Compute differential-guided fusion with non-negative alpha."""
+        D = torch.abs(x_rgb - x_ir)
+        W = torch.softmax(self.sel(torch.cat([x_rgb, x_ir, D], dim=1)), dim=1)
+        w_rgb, w_ir = W[:, 0:1], W[:, 1:2]
+        S = torch.sigmoid(self.diff_enc(D))
+        modal_selected = w_rgb * x_rgb + w_ir * x_ir
+        fused = (1.0 + self.alpha * S) * modal_selected + self.beta * 0.5 * (x_rgb + x_ir)
+        return self.out_proj(fused)
+
+
+class DMGFusionInit8d(DMGFusion):
+    """DMGFusion v1 with an Exp-8d-inspired differential-amplifier initial state."""
+
+    def __init__(
+        self,
+        channels: int,
+        diff_hidden_ratio: float = 0.25,
+        alpha_init: float = 1.0,
+        beta_init: float = -0.1,
+    ):
+        """Initialise alpha positive and beta weakly negative."""
+        super().__init__(channels=channels, diff_hidden_ratio=diff_hidden_ratio)
+        self.alpha.data.fill_(float(alpha_init))
+        self.beta.data.fill_(float(beta_init))
+
+
+class DMGFusionINSigmoid(nn.Module):
+    """DMGFusion v1 variant with IN-normalised gate inputs and independent sigmoid gates.
+
+    The output formula intentionally keeps the alpha*S and beta paths from v1,
+    but computes D, W, and S from instance-normalised RGB/IR features. The two
+    modality gates are independent sigmoid gates instead of a softmax pair.
+    """
+
+    def __init__(
+        self,
+        channels: int,
+        diff_hidden_ratio: float = 0.25,
+        alpha_init: float = 0.5,
+        beta_init: float = 1.0,
+    ):
+        """Initialise IN+sigmoid DMGFusion with a mild positive alpha prior."""
+        super().__init__()
+        c_diff = max(8, int(channels * diff_hidden_ratio))
+        self.inst_norm = nn.InstanceNorm2d(channels, affine=False)
+        self.sel = nn.Sequential(
+            Conv(channels * 3, c_diff, 1),
+            Conv(c_diff, c_diff, 3, g=c_diff),
+            nn.Conv2d(c_diff, 2, 1, bias=True),
+        )
+        self.diff_enc = nn.Sequential(
+            Conv(channels, c_diff, 1),
+            nn.Conv2d(c_diff, channels, 1, bias=True),
+        )
+        self.alpha = nn.Parameter(torch.tensor(float(alpha_init)))
+        self.beta = nn.Parameter(torch.tensor(float(beta_init)))
+        self.out_proj = Conv(channels, channels, 1, act=False)
+
+        nn.init.zeros_(self.sel[-1].bias)
+
+    def forward(self, x_rgb, x_ir):
+        """Compute IN-normalised sigmoid-gated differential fusion."""
+        r_n = self.inst_norm(x_rgb)
+        i_n = self.inst_norm(x_ir)
+        D = torch.abs(r_n - i_n)
+        W = torch.sigmoid(self.sel(torch.cat([r_n, i_n, D], dim=1)))
+        w_rgb, w_ir = W[:, 0:1], W[:, 1:2]
+        S = torch.sigmoid(self.diff_enc(D))
+        modal_selected = w_rgb * x_rgb + w_ir * x_ir
         fused = (1.0 + self.alpha * S) * modal_selected + self.beta * 0.5 * (x_rgb + x_ir)
         return self.out_proj(fused)
 

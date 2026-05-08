@@ -123,6 +123,43 @@ def test_dmg_fusion_param_count():
     assert n_params < 20_000, f"Too many params: {n_params} (expected < 20K)"
 
 
+def test_dmg_posalpha_bounds_alpha():
+    """DMGFusionPosAlpha keeps differential gain non-negative and bounded."""
+    from ultralytics.nn.modules.block import DMGFusionPosAlpha
+
+    m = DMGFusionPosAlpha(channels=32, alpha_max=3.0, alpha_init=1.0)
+    assert 0.0 <= m.alpha.item() <= 3.0
+    assert m.alpha.item() == pytest.approx(1.0, abs=1e-6)
+
+    x_rgb = torch.randn(2, 32, 8, 8)
+    x_ir = torch.randn(2, 32, 8, 8)
+    out = m(x_rgb, x_ir)
+    assert out.shape == x_rgb.shape
+
+
+def test_dmg_init8d_starts_from_differential_amplifier_prior():
+    """DMGFusionInit8d starts from positive alpha and weak negative beta."""
+    from ultralytics.nn.modules.block import DMGFusionInit8d
+
+    m = DMGFusionInit8d(channels=32, alpha_init=1.0, beta_init=-0.1)
+    assert m.alpha.item() == pytest.approx(1.0, abs=1e-6)
+    assert m.beta.item() == pytest.approx(-0.1, abs=1e-6)
+
+
+def test_dmg_in_sigmoid_output_shape_and_init():
+    """DMGFusionINSigmoid preserves shape while using IN-normalized sigmoid gates."""
+    from ultralytics.nn.modules.block import DMGFusionINSigmoid
+
+    m = DMGFusionINSigmoid(channels=32, alpha_init=0.5, beta_init=1.0)
+    assert m.alpha.item() == pytest.approx(0.5, abs=1e-6)
+    assert m.beta.item() == pytest.approx(1.0, abs=1e-6)
+
+    x_rgb = torch.randn(2, 32, 8, 8)
+    x_ir = torch.randn(2, 32, 8, 8)
+    out = m(x_rgb, x_ir)
+    assert out.shape == x_rgb.shape
+
+
 def test_dual_stream_p2_four_scale_stride():
     """DualStream with p2 YAML produces 4 detection scales with strides [4,8,16,32]."""
     from ultralytics.nn.tasks import DualStreamDetectionModel
@@ -151,6 +188,43 @@ def test_dual_stream_p2_uses_dmg_fusion():
     model = DualStreamDetectionModel("yolov12-dual-p2.yaml", nc=3, verbose=False)
     assert isinstance(model.fusion_convs["p2"], DMGFusion), \
         "fusion_convs['p2'] should be DMGFusion when p2_fusion=dmg"
+
+
+@pytest.mark.parametrize(
+    ("cfg", "expected_type"),
+    (
+        ("yolov12-dual-p2-dmg-posalpha.yaml", "DMGFusionPosAlpha"),
+        ("yolov12-dual-p2-dmg-init8d.yaml", "DMGFusionInit8d"),
+        ("yolov12-dual-p2-dmg-in-sigmoid.yaml", "DMGFusionINSigmoid"),
+    ),
+)
+def test_dmg_p2_variant_cfgs_instantiate_expected_fusion(cfg, expected_type):
+    """The three DMG follow-up YAMLs use P4 A2C2f, P3 aux, and intended P2 fusion variants."""
+    from ultralytics.nn.tasks import DualStreamDetectionModel
+
+    model = DualStreamDetectionModel(cfg, nc=3, verbose=False)
+
+    assert model.yaml["p2_fusion"] in {"dmg_posalpha", "dmg_init8d", "dmg_in_sigmoid"}
+    assert type(model.fusion_convs["p2"]).__name__ == expected_type
+    assert model.yaml["backbone"][6][2] == "A2C2f"
+    assert type(model.backbone_rgb[6]).__name__ == "A2C2f"
+    assert type(model.backbone_ir[6]).__name__ == "A2C2f"
+    assert model.use_aux_head is True
+    assert model.yaml["cmg_stages"] == []
+    assert model.yaml["cma_stages"] == []
+
+
+def test_dmg_p2_variant_debug_state_logs_alpha_beta():
+    """DMG P2 variants expose alpha/beta scalars so results.csv records the gate trajectory."""
+    from ultralytics.nn.tasks import DualStreamDetectionModel
+
+    model = DualStreamDetectionModel("yolov12-dual-p2-dmg-posalpha.yaml", nc=3, verbose=False)
+    debug = model.adapter_debug_state()
+
+    assert "dmg/p2_alpha" in debug
+    assert "dmg/p2_beta" in debug
+    assert debug["dmg/p2_alpha"] == pytest.approx(1.0, abs=1e-6)
+    assert debug["dmg/p2_beta"] == pytest.approx(1.0, abs=1e-6)
 
 
 def test_dual_stream_p2_rejects_cmg_at_p2():
