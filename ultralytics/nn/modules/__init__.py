@@ -65,6 +65,9 @@ from .block import (
     ResidualGatedBidirLiCMAAdapter,
     SemanticGuidedMultiScaleCalibration,
     DMGFusion,
+    DMGFusionPosAlpha,
+    DMGFusionInit8d,
+    DMGFusionINSigmoid,
     DMGFusionV2,
 )
 from .conv import (
@@ -176,5 +179,8 @@ __all__ = (
     "ResidualGatedBidirLiCMAAdapter",
     "SemanticGuidedMultiScaleCalibration",
     "DMGFusion",
+    "DMGFusionPosAlpha",
+    "DMGFusionInit8d",
+    "DMGFusionINSigmoid",
     "DMGFusionV2",
 )

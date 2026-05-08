@@ -71,6 +71,9 @@ from ultralytics.nn.modules import (
     ResidualGatedBidirLiCMAAdapter,
     SemanticGuidedMultiScaleCalibration,
     DMGFusion,
+    DMGFusionPosAlpha,
+    DMGFusionInit8d,
+    DMGFusionINSigmoid,
     DMGFusionV2,
 )
 from ultralytics.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, colorstr, emojis, yaml_load
@@ -609,6 +612,28 @@ class DualStreamDetectionModel(DetectionModel):
                 c_out = self._get_layer_out_channels(self.backbone_rgb[layer_idx])
             if stage_name == "p2" and _p2_fusion_mode == "dmg":
                 self.fusion_convs[stage_name] = DMGFusion(c_out)
+            elif stage_name == "p2" and _p2_fusion_mode == "dmg_posalpha":
+                self.fusion_convs[stage_name] = DMGFusionPosAlpha(
+                    c_out,
+                    diff_hidden_ratio=float(self.yaml.get("dmg_diff_hidden_ratio", 0.25)),
+                    alpha_max=float(self.yaml.get("dmg_alpha_max", 3.0)),
+                    alpha_init=float(self.yaml.get("dmg_alpha_init", 1.0)),
+                    beta_init=float(self.yaml.get("dmg_beta_init", 1.0)),
+                )
+            elif stage_name == "p2" and _p2_fusion_mode == "dmg_init8d":
+                self.fusion_convs[stage_name] = DMGFusionInit8d(
+                    c_out,
+                    diff_hidden_ratio=float(self.yaml.get("dmg_diff_hidden_ratio", 0.25)),
+                    alpha_init=float(self.yaml.get("dmg_alpha_init", 1.0)),
+                    beta_init=float(self.yaml.get("dmg_beta_init", -0.1)),
+                )
+            elif stage_name == "p2" and _p2_fusion_mode == "dmg_in_sigmoid":
+                self.fusion_convs[stage_name] = DMGFusionINSigmoid(
+                    c_out,
+                    diff_hidden_ratio=float(self.yaml.get("dmg_diff_hidden_ratio", 0.25)),
+                    alpha_init=float(self.yaml.get("dmg_alpha_init", 0.5)),
+                    beta_init=float(self.yaml.get("dmg_beta_init", 1.0)),
+                )
             elif stage_name == "p2" and _p2_fusion_mode == "dmg_v2":
                 self.fusion_convs[stage_name] = DMGFusionV2(c_out)
             else:
@@ -738,6 +763,16 @@ class DualStreamDetectionModel(DetectionModel):
     def adapter_debug_state(self):
         """Collect scalar debug variables from residual-gated bidir adapters."""
         debug = {}
+        fusion_convs = getattr(self, "fusion_convs", {})
+        p2_fusion = fusion_convs["p2"] if "p2" in fusion_convs else None
+        if p2_fusion is not None:
+            for key in ("alpha", "alpha_raw", "beta"):
+                value = getattr(p2_fusion, key, None)
+                if isinstance(value, torch.Tensor):
+                    debug[f"dmg/p2_{key}"] = value.detach().float().item()
+            alpha_max = getattr(p2_fusion, "alpha_max", None)
+            if alpha_max is not None:
+                debug["dmg/p2_alpha_max"] = float(alpha_max)
         for stage_name, module in getattr(self, "_bidir_adapter_modules", {}).items():
             for key, value in module.debug_state().items():
                 debug[f"adapter/{stage_name}_{key}"] = value
@@ -778,7 +813,14 @@ class DualStreamDetectionModel(DetectionModel):
         for stage_name in self.FUSION_LAYER_INDICES:
             r, i = feats_rgb[stage_name], feats_ir[stage_name]
             fc = self.fusion_convs[stage_name]
-            fused[stage_name] = fc(r, i) if isinstance(fc, (DMGFusion, DMGFusionV2)) else fc(torch.cat([r, i], dim=1))
+            fused[stage_name] = (
+                fc(r, i)
+                if isinstance(
+                    fc,
+                    (DMGFusion, DMGFusionPosAlpha, DMGFusionInit8d, DMGFusionINSigmoid, DMGFusionV2),
+                )
+                else fc(torch.cat([r, i], dim=1))
+            )
         sgmc_module = getattr(self, "_sgmc_module", None)
         if sgmc_module is not None:
             fused = sgmc_module(fused)

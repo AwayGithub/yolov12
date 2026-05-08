@@ -25,6 +25,10 @@ file	status	url
 2022_AAAI_MArMOT.pdf	OK	https://cdn.aaai.org/ojs/20016/20016-13-24029-1-2-20220628.pdf
 2025_AAAI_AINet_ProgressiveFusionMamba.pdf	OK	https://arxiv.org/pdf/2408.08827
 2025_AAAI_CAFormer_RGBT_Tracking.pdf	OK	https://arxiv.org/pdf/2408.02222
+2022_AAAI_EGFNet.pdf	OK	https://arxiv.org/pdf/2112.05144
+2023_CVPR_MVSS_MVNet.pdf	OK	https://openaccess.thecvf.com/content/CVPR2023/papers/Ji_Multispectral_Video_Semantic_Segmentation_A_Benchmark_Dataset_and_Baseline_CVPR_2023_paper.pdf
+2023_ACMMM_SemanticRT_ECM.pdf	FAIL_ACM_CLOUDFLARE	https://dl.acm.org/doi/pdf/10.1145/3581783.3611738
+2023_ACMMM_TIRDet.pdf	FAIL_ACM_CLOUDFLARE	https://dl.acm.org/doi/pdf/10.1145/3581783.3613849
 2023_ACMMM_CALNet.pdf	FAIL_ACM_403	https://dl.acm.org/doi/pdf/10.1145/3581783.3612651
 2022_AAAI_APFNet_RGBT_Tracking.pdf	FAIL_AAAI_503	https://ojs.aaai.org/index.php/AAAI/article/view/20187/19946
 2024_AAAI_BAT.pdf	FAIL_AAAI_503	https://ojs.aaai.org/index.php/AAAI/article/view/27852/27730
