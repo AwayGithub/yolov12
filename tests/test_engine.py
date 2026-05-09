@@ -1,6 +1,7 @@
 # Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
 
 import sys
+from types import SimpleNamespace
 from unittest import mock
 
 import pytest
@@ -41,6 +42,42 @@ def test_detection_validator_reports_per_class_box_metrics():
     assert metrics["metrics/fire/precision(B)"] == 0.0
     assert metrics["metrics/person/precision(B)"] == pytest.approx(0.5)
     assert metrics["metrics/person/mAP50-95(B)"] == pytest.approx(0.8)
+
+
+def test_detection_validator_prints_metrics_with_five_decimals():
+    """Test detection validation table prints metric values with five decimals."""
+
+    class Counts(list):
+
+        def sum(self):
+            return sum(self)
+
+    class DummyMetrics:
+        keys = ["metrics/precision(B)", "metrics/recall(B)", "metrics/mAP50(B)", "metrics/mAP50-95(B)"]
+        ap_class_index = [0]
+
+        def mean_results(self):
+            return 0.123456, 0.234567, 0.345678, 0.456789
+
+        def class_result(self, i):
+            return 0.567891, 0.678912, 0.789123, 0.891234
+
+    validator = DetectionValidator.__new__(DetectionValidator)
+    validator.seen = 7
+    validator.nt_per_class = Counts([3, 4])
+    validator.nt_per_image = Counts([2, 5])
+    validator.metrics = DummyMetrics()
+    validator.args = SimpleNamespace(task="detect", verbose=True, plots=False)
+    validator.training = False
+    validator.nc = 2
+    validator.stats = {"tp": [1]}
+    validator.names = {0: "smoke", 1: "fire"}
+
+    with mock.patch("ultralytics.models.yolo.detect.val.LOGGER.info") as info:
+        validator.print_results()
+
+    assert "0.12346" in info.call_args_list[0].args[0]
+    assert "0.89123" in info.call_args_list[1].args[0]
 
 
 def test_export():

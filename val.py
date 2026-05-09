@@ -156,10 +156,10 @@ if __name__ == "__main__":
     # 获取指标 (使用第一次运行的完整结果)
     if hasattr(metrics, "results_dict"):
         results_dict = metrics.results_dict
-        print(f"mAP50:      {results_dict.get('metrics/mAP50(B)', 0.0):.4f}")
-        print(f"mAP50-95:   {results_dict.get('metrics/mAP50-95(B)', 0.0):.4f}")
-        print(f"Precision:  {results_dict.get('metrics/precision(B)', 0.0):.4f}")
-        print(f"Recall:     {results_dict.get('metrics/recall(B)', 0.0):.4f}")
+        print(f"mAP50:      {results_dict.get('metrics/mAP50(B)', 0.0):.5f}")
+        print(f"mAP50-95:   {results_dict.get('metrics/mAP50-95(B)', 0.0):.5f}")
+        print(f"Precision:  {results_dict.get('metrics/precision(B)', 0.0):.5f}")
+        print(f"Recall:     {results_dict.get('metrics/recall(B)', 0.0):.5f}")
     
     # 计算并输出平均推理时间
     if all_speeds:
