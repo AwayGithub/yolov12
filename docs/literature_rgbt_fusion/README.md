@@ -25,7 +25,7 @@
 
 | 优先级 | 论文                                                                                                                                                       | 来源                  | 等级       |   年份 | 任务                                                    | 公开代码                                                                                   | PDF                                          | 结构关键词                                                                                          | 对当前 YOLOv12-RGBT 的直接价值                                                                  |
 | --- | -------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------- | -------- | ---: | ----------------------------------------------------- | -------------------------------------------------------------------------------------- | -------------------------------------------- | ---------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
-| 1   | Causal Mode Multiplexer: A Novel Framework for Unbiased Multispectral Pedestrian Detection (CMM)                                                         | CVPR                | CCF-A 会议 | 2024 | RGB-T pedestrian detection                            | <https://github.com/ssbin0914/Causal-Mode-Multiplexer>                                 | `pdfs/2024_CVPR_CMM.pdf`                     | modality bias, causal mode, counterfactual intervention, RGB/T visibility modes                | 很适合支撑“热红外并非总是正收益”的论文动机；可解释火情数据中 smoke/fire/person 对 RGB/IR 依赖不同，提示后续模块应做可靠性选择而非强融合      |
+| 1   | Causal Mode Multiplexer: A Novel Framework for Unbiased Multispectral Pedestrian Detection (CMM)                                                         | CVPR                | CCF-A 会议 | 2024 | RGB-T pedestrian detection                            | <https://github.com/ssbin0914/Causal-Mode-Multiplexer>                                 | `pdfs/2024_CVPR_CMM.pdf`                     | modality bias, ROTX, CMM routing, RGB/IR branch agreement, thermal shortcut suppression        | 已精读。本文不是常规“更强融合”论文，而是指出 RGBT 检测器会学习热红外捷径：热红外有人形才判人。CMM 用 RGB/IR 单模态分支判断 ROI 是否意见一致，不一致时扣除热红外单独影响；可支撑可靠性路由、门控融合和“热红外不总是正收益”的论文动机 |
 | 2   | WaveMamba: Wavelet-Driven Mamba Fusion for RGB-Infrared Object Detection                                                                                 | ICCV                | CCF-A 会议 | 2025 | RGB-IR object detection                               | 代码待确认                                                                                  | `pdfs/2025_ICCV_WaveMamba.pdf`               | wavelet decomposition, low-frequency Mamba fusion, gated attention, high-frequency enhancement | 很适合支撑“RGB 与 IR 的优势频段不同”：IR 更适合低频轮廓，RGB 更适合高频纹理；可为你后续做轻量频域/分支特化提供高等级参考                   |
 | 3   | Rethinking Multi-modal Object Detection from the Perspective of Mono-Modality Feature Learning (M2D-LIF)                                                 | ICCV                | CCF-A 会议 | 2025 | RGB-IR object detection                               | <https://github.com/Zhao-Tian-yi/M2D-LIF>                                              | `pdfs/2025_ICCV_M2D_LIF.pdf`                 | fusion degradation, mono-modality distillation, local illumination-aware fusion                | 非常贴合当前公平实验结论：强融合可能削弱单模态学习，导致 fusion degradation；可解释 DMG/BidirLiCMA 没有稳定正收益              |
 | 4   | Fusion Meets Diverse Conditions: A High-diversity Benchmark and Baseline for UAV-based Multimodal Object Detection with Condition Cues (PCDF / ATR-UMOD) | ICCV                | CCF-A 会议 | 2025 | UAV RGB-IR object detection                           | 代码待确认                                                                                  | `pdfs/2025_ICCV_PCDF_ATR_UMOD.pdf`           | condition cues, prompt-guided dynamic fusion, soft-gating, condition decoupling                | 支持“按场景/成像条件动态分配模态贡献”的叙事；对烟雾、火焰、弱光、过曝等条件差异很有启发                                           |
@@ -84,7 +84,19 @@
 
 ## 五、对当前 YOLOv12-RGBT 实验的直接启发
 
-### 5.1 BidirLiCMA\@P5 为什么容易不稳
+### 5.1 CMM 的参考价值与地位
+
+CMM 是当前列表中最重要的 **模态可靠性/偏置诊断** 论文之一。它的地位不在于提出更复杂的融合算子，而在于把 RGBT 检测的失败来源从“融合不充分”推进到“训练分布诱导的热红外捷径”：模型可能把热红外中的人形轮廓当成主要判据，一旦出现 RGB 可见但热红外不可见或很弱的 ROTX 场景，就容易漏检。
+
+对当前 YOLOv12-RGBT 的参考价值主要有三点：
+
+- 研究动机：可直接支撑“热红外不总是正收益”。在烟雾、火焰、玻璃、隔热材料、反光或热源干扰下，IR 可能从辅助信息变成误导信息。
+- 方法设计：CMM 用 RGB/IR 单模态分支先判断同一候选区域中两种模态是否都支持“有人”，再决定是否削弱热红外贡献。这一思想可迁移为 YOLO 中的区域级、类别级或尺度级 reliability gate。
+- 实验叙事：ROTX-MP 本质上是压力测试数据集，提醒后续实验不能只看常规 RGB-T 测试集，还应按烟雾、弱光、强热源、遮挡等条件拆分分析。
+
+因此，CMM 适合作为本文后续可靠性路由、残差门控、类别/场景自适应融合的核心依据；不建议照搬其 Faster R-CNN 两阶段结构，真正值得迁移的是“先判断模态是否一致可信，再融合或扣减贡献”的工程逻辑。
+
+### 5.2 BidirLiCMA\@P5 为什么容易不稳
 
 CMM、CALNet、AANet、C²Former、AMDANet 都指向同一个事实：RGB/IR 深层特征不是天然互补，存在统计偏置、空间错位、语义冲突和模态可靠性差异。直接把 P5 换成双向交叉注意力，可能把另一模态的噪声、错位和类别偏差一起注入主干，导致：
 
@@ -95,7 +107,7 @@ CMM、CALNet、AANet、C²Former、AMDANet 都指向同一个事实：RGB/IR 深
 
 因此，BidirLiCMA 后续更适合做成 **残差、门控、低秩/降采样、延迟开启** 的形式，而不是替换式大模块。
 
-### 5.2 SGMC / P5 引导 P345 的论文支撑
+### 5.3 SGMC / P5 引导 P345 的论文支撑
 
 DAMSDet、CMX、AMDANet 都支持“高层语义指导多层特征校准”的方向。更合理的表述是：
 
@@ -105,7 +117,7 @@ DAMSDet、CMX、AMDANet 都支持“高层语义指导多层特征校准”的�
 - 分类别观察 fire/person/smoke 是否有一致收益；
 - 若只提升 recall 但 precision 掉得多，应考虑 target-aware 或 conflict-aware 约束。
 
-### 5.3 P3 aux 与 P4 C3k2 的叙事
+### 5.4 P3 aux 与 P4 C3k2 的叙事
 
 P3 aux 不应只写成“加一个辅助头”，更合适的论文表述是：
 
@@ -119,7 +131,7 @@ P4 C3k2 或 A2C2f 的比较，则更适合写成“neck/backbone 中层去噪与
 ## 六、建议精读顺序
 
 1. `pdfs/2025_ICCV_M2D_LIF.pdf`：先读 fusion degradation 与 mono-modality insufficient learning，最贴合当前 DMG/SGMC 公平复现实验的负结果解释。
-2. `pdfs/2024_CVPR_CMM.pdf`：读 modality bias 与 causal mode，适合写“热红外不总是正收益”的动机。
+2. `pdfs/2024_CVPR_CMM.pdf`（已精读，见 `notes/2024_CVPR_CMM_精读.md`）：重点关注 ROTX、热红外捷径和 CMM 路由，适合写“热红外不总是正收益”以及“融合模块需要可靠性判断”的动机。
 3. `pdfs/2025_ICCV_WaveMamba.pdf`：重点看 RGB/IR 的频域互补、低频 Mamba 和 gated attention，适合支撑“不要简单强融合”。
 4. `pdfs/2025_ICCV_PCDF_ATR_UMOD.pdf`：重点看 condition cues 与 prompt-guided dynamic fusion，可服务烟雾/弱光/过曝等条件差异叙事。
 5. `pdfs/2024_ECCV_DAMSDet.pdf`：重点看 query selection 与 multispectral deformable cross-attention。
