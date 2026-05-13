@@ -106,18 +106,27 @@ F1-F4 表明，公平口径下最明确的收益来自 P3 aux；其中 F2（plai
 D1-D3 的实验含义如下：
 
 - D1（PosAlpha）：约束 DMG 的差分放大系数 `alpha >= 0`，避免模型学成“差分抑制”。
-- D2（Init8d）：用历史 Exp-8d 的有效趋势初始化 DMG，使其从训练初期就偏向“差分放大 + 共模抑制”。
+- D2.1（Init8d）：`alpha_init=1.0`，`beta_init=-0.1`。用历史 Exp-8d 的有效趋势初始化 DMG，使其从训练初期就偏向“差分放大 + 共模抑制”。
 - D3（In-Sigmoid）：尝试用 InstanceNorm 后的独立 sigmoid 门控替代原始 softmax 选择，但实验显示高 IoU 指标下降，已废弃。
 
 ### 3.1 训练配置
 
-| 编号 | 实验目录                                           | P2 fusion      | P4 block | P3 aux | 数据来源           |
-| -- | ---------------------------------------------- | -------------- | -------- | ------ | ------------------ |
-| D1 | `train_MF_DMGPosAlphaP2_P2345_P4A2C2f_P3aux`   | DMG PosAlpha   | A2C2f    | on     | `results1.png`     |
-| D2 | `train_MF_DMGInit8dP2_P2345_P4A2C2f_P3aux`     | DMG Init8d     | A2C2f    | on     | `results1.png`     |
-| D3 | `train_MF_DMGSigmoidP2_P2345_P4A2C2f_P3aux`    | DMG In-Sigmoid（已废弃） | A2C2f    | on     | `results1.png`     |
+| 编号 | 实验目录                                           | P2 fusion      | alpha_init | beta_init | P4 block | P3 aux | 状态 / 数据来源 |
+| -- | ---------------------------------------------- | -------------- | ---------: | --------: | -------- | ------ | ------------- |
+| D1 | `train_MF_DMGPosAlphaP2_P2345_P4A2C2f_P3aux`   | DMG PosAlpha   | -          | -         | A2C2f    | on     | 已完成 / `results1.png` |
+| D2.1 | `train_MF_DMGInit8dP2_P2345_P4A2C2f_P3aux`   | DMG Init8d     | 1.0        | -0.1      | A2C2f    | on     | 已完成 / `results1.png` |
+| D2.2 | `train_MF_DMGInit8dP2_a1p5_bm015_P2345_P4A2C2f_P3aux` | DMG Init8d | 1.5        | -0.15     | A2C2f    | on     | 待跑 / new |
+| D2.3 | `train_MF_DMGInit8dP2_a2p0_bm030_P2345_P4A2C2f_P3aux` | DMG Init8d | 2.0        | -0.3      | A2C2f    | on     | 待跑 / new |
+| D3 | `train_MF_DMGSigmoidP2_P2345_P4A2C2f_P3aux`    | DMG In-Sigmoid（已废弃） | - | - | A2C2f | on | 已废弃 / `results1.png` |
 
-### 3.2 D1 验证结果
+### 3.2a D2.2 / D2.3 训练命令
+
+```bash
+python train.py --cfg ultralytics/cfg/models/v12/yolov12-dual-p2-dmg-init8d-a1p5-bm015.yaml --input_mode dual_input --epochs 200
+python train.py --cfg ultralytics/cfg/models/v12/yolov12-dual-p2-dmg-init8d-a2p0-bm030.yaml --input_mode dual_input --epochs 200
+```
+
+### 3.3 D1 验证结果
 
 | Class  |       P |       R |   mAP50 |    mAP50-95 |
 | ------ | ------: | ------: | ------: | ----------: |
@@ -126,7 +135,7 @@ D1-D3 的实验含义如下：
 | fire   | 0.93464 | 0.91826 | 0.94346 |     0.58629 |
 | person | 0.91203 | 0.91034 | 0.94290 |     0.58573 |
 
-### 3.3 D2 验证结果
+### 3.4 D2.1 验证结果
 
 | Class  |       P |       R |   mAP50 |    mAP50-95 |
 | ------ | ------: | ------: | ------: | ----------: |
@@ -135,7 +144,7 @@ D1-D3 的实验含义如下：
 | fire   | 0.93958 | 0.92120 | 0.94662 |     0.58932 |
 | person | 0.91233 | 0.91264 | 0.94254 |     0.58236 |
 
-### 3.4 D3 验证结果
+### 3.5 D3 验证结果
 
 | Class  |       P |       R |   mAP50 |    mAP50-95 |
 | ------ | ------: | ------: | ------: | ----------: |
@@ -144,7 +153,7 @@ D1-D3 的实验含义如下：
 | fire   | 0.93746 | 0.92114 | 0.94151 |     0.58388 |
 | person | 0.91414 | 0.90805 | 0.93913 |     0.57653 |
 
-### 3.5 相对 F2 的逐类别分析
+### 3.6 相对 F2 的逐类别分析
 
 F2 基线为 `plainP2 + A2C2f@P4 + P3 aux`，all mAP50-95 为 0.63529。
 
@@ -154,15 +163,15 @@ F2 基线为 `plainP2 + A2C2f@P4 + P3 aux`，all mAP50-95 为 0.63529。
 | D1 | smoke  | +0.00513 | +0.00391 | +0.00133 |  -0.00140 | 检出质量提升，但高 IoU 指标略低于 F2 |
 | D1 | fire   | +0.00294 | +0.00853 | +0.00640 |  -0.00039 | recall 和 mAP50 明显提升，mAP50-95 基本持平略低 |
 | D1 | person | +0.00194 | +0.00172 | +0.00695 |  +0.00595 | person 是 D1 的主要收益来源 |
-| D2 | all    | +0.00052 | +0.00676 | +0.00506 |  -0.00003 | 总体与 F2 基本持平 |
-| D2 | smoke  | -0.00855 | +0.00479 | -0.00096 |  -0.00532 | 明显损伤 smoke，是 D2 未超过 F2 的主要原因 |
-| D2 | fire   | +0.00788 | +0.01147 | +0.00956 |  +0.00264 | fire 提升最稳定，符合差分放大预期 |
-| D2 | person | +0.00224 | +0.00402 | +0.00659 |  +0.00258 | person 也有正收益 |
+| D2.1 | all    | +0.00052 | +0.00676 | +0.00506 |  -0.00003 | 总体与 F2 基本持平 |
+| D2.1 | smoke  | -0.00855 | +0.00479 | -0.00096 |  -0.00532 | 明显损伤 smoke，是 D2.1 未超过 F2 的主要原因 |
+| D2.1 | fire   | +0.00788 | +0.01147 | +0.00956 |  +0.00264 | fire 提升最稳定，符合差分放大预期 |
+| D2.1 | person | +0.00224 | +0.00402 | +0.00659 |  +0.00258 | person 也有正收益 |
 | D3 | all    | +0.00337 | +0.00526 | +0.00295 |  -0.00234 | 粗检出增强，但高 IoU 指标下降 |
 | D3 | smoke  | +0.00029 | +0.00495 | +0.00123 |  -0.00098 | smoke 基本持平略低 |
 | D3 | fire   | +0.00576 | +0.01141 | +0.00445 |  -0.00280 | recall 提升明显，但定位质量下降 |
 | D3 | person | +0.00405 | -0.00057 | +0.00318 |  -0.00325 | person 的 mAP50-95 损失最大 |
 
-D1（PosAlpha）是 all mAP50-95 最高的方案，相对 F2 提升 +0.00139，主要收益来自 person。若按火情监测任务的实际优先级，更关注 fire 与 person，而不是 all 平均值，则 D2（Init8d）是当前更合适的主线：fire mAP50-95 相对 F2 提升 +0.00264，person mAP50-95 提升 +0.00258，且 fire/person 的 P、R、mAP50 均同步提高。D2 的代价是 smoke mAP50-95 下降 -0.00532，因此论文表述应强调其面向关键目标 fire/person 的收益，而不是声称全类别平均最优。D3（In-Sigmoid）不适合作为主线：虽然 P/R 和 mAP50 多数上涨，但 mAP50-95 全面下降，说明它更像提升粗检出而损伤高 IoU 定位质量。
+D1（PosAlpha）是 all mAP50-95 最高的方案，相对 F2 提升 +0.00139，主要收益来自 person。若按火情监测任务的实际优先级，更关注 fire 与 person，而不是 all 平均值，则 D2.1（Init8d，`alpha_init=1.0`、`beta_init=-0.1`）是当前更合适的主线：fire mAP50-95 相对 F2 提升 +0.00264，person mAP50-95 提升 +0.00258，且 fire/person 的 P、R、mAP50 均同步提高。D2.1 的代价是 smoke mAP50-95 下降 -0.00532，因此论文表述应强调其面向关键目标 fire/person 的收益，而不是声称全类别平均最优。D3（In-Sigmoid）不适合作为主线：虽然 P/R 和 mAP50 多数上涨，但 mAP50-95 全面下降，说明它更像提升粗检出而损伤高 IoU 定位质量。
 
 D3 仅保留为负结果记录；由于其对 all、fire、person 的 mAP50-95 均为负收益，相关 `DMGFusionINSigmoid` 实现和 `yolov12-dual-p2-dmg-in-sigmoid.yaml` 配置已从代码仓库删除，后续不再维护为可运行实验分支。此前已经证明效果不佳的 `DMGFusionV2` 与 SGMC 也同步废弃：相关模块实现、`p2_fusion=dmg_v2` 分派和 `yolov12-dual-p2-sgmc.yaml` 配置已移除，仅保留历史实验记录。

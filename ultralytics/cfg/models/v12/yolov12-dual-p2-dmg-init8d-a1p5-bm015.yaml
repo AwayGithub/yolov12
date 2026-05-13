@@ -1,5 +1,5 @@
-# YOLOv12 dual-stream P2 DMG follow-up D2.1
-# DMG-Init8d: keep DMGFusion v1 formula, start near a differential-amplifier state.
+# YOLOv12 dual-stream P2 DMG follow-up D2.2
+# DMG-Init8d: keep DMGFusion v1 formula, but start from a stronger differential-amplifier state.
 # Backbone target: P4 A2C2f + default P3 aux head.
 
 nc: 3
@@ -8,8 +8,8 @@ dual_stream: true
 
 p2_fusion: dmg_init8d
 dmg_diff_hidden_ratio: 0.25
-dmg_alpha_init: 1.0
-dmg_beta_init: -0.1
+dmg_alpha_init: 1.5
+dmg_beta_init: -0.15
 
 scales:
   n: [0.50, 0.25, 1024]
