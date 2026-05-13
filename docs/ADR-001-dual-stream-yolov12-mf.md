@@ -84,7 +84,7 @@ Input: (B, 6, H, W)
 |------|------|--------|
 | `cmg_stages` | SE-CMG 跨模态门控所在层级 | 子集 of `{p3,p4,p5}` |
 | `cma_stages` | CrossModalA2C2f 双向跨模态注意力层级 | 子集 of `{p3,p4,p5}` |
-| `p2_fusion` | P2 融合方式 | `plain` / `dmg` / `dmg_v2` |
+| `p2_fusion` | P2 融合方式 | `plain` / `dmg` / `dmg_posalpha` / `dmg_init8d` |
 
 ---
 

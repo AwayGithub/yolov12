@@ -6,8 +6,6 @@ nc: 3
 ch: 6
 dual_stream: true
 
-cmg_stages: []
-cma_stages: []
 p2_fusion: plain
 
 scales:
