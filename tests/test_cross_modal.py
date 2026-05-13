@@ -1,94 +1,7 @@
-"""Smoke tests for cross-modal attention modules (Exp-4b: bidirectional residual CMA)."""
+"""Smoke tests for dual-stream DMG and plain P2 configurations."""
 
 import pytest
 import torch
-
-from ultralytics.nn.modules.block import CrossModalA2C2f, CrossModalAAttn
-
-
-def test_cross_modal_aattn_shape():
-    """CrossModalAAttn should preserve spatial dims, Q from x_self, KV from x_other."""
-    m = CrossModalAAttn(dim=64, num_heads=2, area=4)
-    x_self = torch.randn(2, 64, 8, 8)
-    x_other = torch.randn(2, 64, 8, 8)
-    out = m(x_self, x_other)
-    assert out.shape == (2, 64, 8, 8)
-
-
-def test_cross_modal_aattn_area1():
-    """area=1 means no spatial partitioning (used at P5)."""
-    m = CrossModalAAttn(dim=64, num_heads=2, area=1)
-    x_self = torch.randn(2, 64, 4, 4)
-    x_other = torch.randn(2, 64, 4, 4)
-    out = m(x_self, x_other)
-    assert out.shape == (2, 64, 4, 4)
-
-
-def test_cross_modal_a2c2f_shape():
-    """CrossModalA2C2f: output shape matches input shape."""
-    m = CrossModalA2C2f(c1=128, c2=128, n=2, area=4)
-    x_self = torch.randn(2, 128, 8, 8)
-    x_other = torch.randn(2, 128, 8, 8)
-    out = m(x_self, x_other)
-    assert out.shape == (2, 128, 8, 8)
-
-
-def test_cross_modal_a2c2f_group_split():
-    """n=2 -> all 2 groups in m_self (full self-attn capacity) + 1 cross-modal residual."""
-    m = CrossModalA2C2f(c1=128, c2=128, n=2, area=4)
-    assert len(m.m_self) == 2   # ALL n groups keep self-attention
-    assert len(m.m_cross) == 1  # last 1 group also has cross-modal residual
-    assert hasattr(m, "cross_scale"), "cross_scale parameter must exist"
-
-
-def test_cross_modal_a2c2f_p5_config():
-    """P5 config: 256ch, area=1."""
-    m = CrossModalA2C2f(c1=256, c2=256, n=2, area=1)
-    x_self = torch.randn(2, 256, 4, 4)
-    x_other = torch.randn(2, 256, 4, 4)
-    out = m(x_self, x_other)
-    assert out.shape == (2, 256, 4, 4)
-
-
-def test_dual_stream_cma_forward():
-    """DualStreamDetectionModel with cma_stages produces valid output."""
-    from ultralytics.nn.tasks import DualStreamDetectionModel
-
-    model = DualStreamDetectionModel("yolov12-dual.yaml", nc=3)
-    model.eval()
-    x = torch.randn(1, 6, 128, 128)
-    with torch.no_grad():
-        out = model(x)
-    assert out is not None
-
-
-def test_dual_stream_cma_and_cmg_combined():
-    """cma_stages and cmg_stages work simultaneously."""
-    from ultralytics.nn.tasks import DualStreamDetectionModel
-
-    model = DualStreamDetectionModel("yolov12-dual.yaml", nc=3)
-    model.eval()
-    assert len(model.cmg_modules) > 0, "CMG modules should be present"
-    assert len(model._cma_layer_to_stage) > 0, "CMA stages should be configured"
-    x = torch.randn(1, 6, 128, 128)
-    with torch.no_grad():
-        out = model(x)
-    assert out is not None
-
-
-def test_dual_stream_cma_bidirectional():
-    """Both RGB and IR backbones have CrossModalA2C2f (bidirectional CMA)."""
-    from ultralytics.nn.tasks import DualStreamDetectionModel
-
-    model = DualStreamDetectionModel("yolov12-dual.yaml", nc=3, verbose=False)
-    for layer_idx in model._cma_layer_to_stage:
-        assert isinstance(model.backbone_rgb[layer_idx], CrossModalA2C2f), \
-            f"backbone_rgb[{layer_idx}] should be CrossModalA2C2f"
-        assert isinstance(model.backbone_ir[layer_idx], CrossModalA2C2f), \
-            f"backbone_ir[{layer_idx}] should be CrossModalA2C2f (bidirectional)"
-        # Weights must be independent (different objects)
-        assert model.backbone_rgb[layer_idx] is not model.backbone_ir[layer_idx]
-
 
 def test_dmg_fusion_output_shape():
     """DMGFusion preserves spatial dims and channel count."""
@@ -146,18 +59,17 @@ def test_dmg_init8d_starts_from_differential_amplifier_prior():
     assert m.beta.item() == pytest.approx(-0.1, abs=1e-6)
 
 
-def test_dmg_in_sigmoid_output_shape_and_init():
-    """DMGFusionINSigmoid preserves shape while using IN-normalized sigmoid gates."""
-    from ultralytics.nn.modules.block import DMGFusionINSigmoid
+def test_dual_stream_rejects_unknown_p2_fusion_modes():
+    """Unknown P2 fusion modes should fail fast instead of silently falling back to plain fusion."""
+    from ultralytics.nn.tasks import DualStreamDetectionModel
+    from ultralytics.utils import yaml_load
+    from ultralytics.utils.checks import check_yaml
 
-    m = DMGFusionINSigmoid(channels=32, alpha_init=0.5, beta_init=1.0)
-    assert m.alpha.item() == pytest.approx(0.5, abs=1e-6)
-    assert m.beta.item() == pytest.approx(1.0, abs=1e-6)
+    cfg = yaml_load(check_yaml("yolov12-dual-p2.yaml"))
+    cfg["p2_fusion"] = "unsupported_fusion"
 
-    x_rgb = torch.randn(2, 32, 8, 8)
-    x_ir = torch.randn(2, 32, 8, 8)
-    out = m(x_rgb, x_ir)
-    assert out.shape == x_rgb.shape
+    with pytest.raises(ValueError, match="unsupported_fusion"):
+        DualStreamDetectionModel(cfg, nc=3, verbose=False)
 
 
 def test_dual_stream_p2_four_scale_stride():
@@ -185,7 +97,12 @@ def test_dual_stream_p2_uses_dmg_fusion():
     """With p2_fusion=dmg, fusion_convs['p2'] is a DMGFusion instance."""
     from ultralytics.nn.modules.block import DMGFusion
     from ultralytics.nn.tasks import DualStreamDetectionModel
-    model = DualStreamDetectionModel("yolov12-dual-p2.yaml", nc=3, verbose=False)
+    from ultralytics.utils import yaml_load
+    from ultralytics.utils.checks import check_yaml
+
+    cfg = yaml_load(check_yaml("yolov12-dual-p2.yaml"))
+    cfg["p2_fusion"] = "dmg"
+    model = DualStreamDetectionModel(cfg, nc=3, verbose=False)
     assert isinstance(model.fusion_convs["p2"], DMGFusion), \
         "fusion_convs['p2'] should be DMGFusion when p2_fusion=dmg"
 
@@ -195,23 +112,20 @@ def test_dual_stream_p2_uses_dmg_fusion():
     (
         ("yolov12-dual-p2-dmg-posalpha.yaml", "DMGFusionPosAlpha"),
         ("yolov12-dual-p2-dmg-init8d.yaml", "DMGFusionInit8d"),
-        ("yolov12-dual-p2-dmg-in-sigmoid.yaml", "DMGFusionINSigmoid"),
     ),
 )
 def test_dmg_p2_variant_cfgs_instantiate_expected_fusion(cfg, expected_type):
-    """The three DMG follow-up YAMLs use P4 A2C2f, P3 aux, and intended P2 fusion variants."""
+    """The active DMG follow-up YAMLs use P4 A2C2f, P3 aux, and intended P2 fusion variants."""
     from ultralytics.nn.tasks import DualStreamDetectionModel
 
     model = DualStreamDetectionModel(cfg, nc=3, verbose=False)
 
-    assert model.yaml["p2_fusion"] in {"dmg_posalpha", "dmg_init8d", "dmg_in_sigmoid"}
+    assert model.yaml["p2_fusion"] in {"dmg_posalpha", "dmg_init8d"}
     assert type(model.fusion_convs["p2"]).__name__ == expected_type
     assert model.yaml["backbone"][6][2] == "A2C2f"
     assert type(model.backbone_rgb[6]).__name__ == "A2C2f"
     assert type(model.backbone_ir[6]).__name__ == "A2C2f"
     assert model.use_aux_head is True
-    assert model.yaml["cmg_stages"] == []
-    assert model.yaml["cma_stages"] == []
 
 
 def test_dmg_p2_variant_debug_state_logs_alpha_beta():
@@ -225,65 +139,6 @@ def test_dmg_p2_variant_debug_state_logs_alpha_beta():
     assert "dmg/p2_beta" in debug
     assert debug["dmg/p2_alpha"] == pytest.approx(1.0, abs=1e-6)
     assert debug["dmg/p2_beta"] == pytest.approx(1.0, abs=1e-6)
-
-
-def test_dual_stream_p2_rejects_cmg_at_p2():
-    """Setting cmg_stages=[p2] must raise ValueError (p2 is not a valid CMG stage)."""
-    import pytest
-    from ultralytics.nn.tasks import DualStreamDetectionModel
-    from ultralytics.utils import yaml_load
-    from ultralytics.utils.checks import check_yaml
-    cfg_path = check_yaml("yolov12-dual-p2.yaml")
-    cfg = yaml_load(cfg_path)
-    cfg["cmg_stages"] = ["p2"]
-    with pytest.raises(ValueError, match="p2"):
-        DualStreamDetectionModel(cfg, nc=3, verbose=False)
-
-
-def test_sgmc_calibrates_multiscale_features():
-    """SGMC preserves target feature shapes and exposes bounded gate debug state."""
-    from ultralytics.nn.modules.block import SemanticGuidedMultiScaleCalibration
-
-    channels = {"p3": 128, "p4": 256, "p5": 512}
-    m = SemanticGuidedMultiScaleCalibration(
-        channels=channels,
-        source="p5",
-        targets=("p3", "p4", "p5"),
-        ratio=0.25,
-        gate_limit=0.1,
-        init_gate=0.001,
-    )
-    feats = {
-        "p3": torch.randn(2, 128, 32, 32),
-        "p4": torch.randn(2, 256, 16, 16),
-        "p5": torch.randn(2, 512, 8, 8),
-    }
-    out = m(feats)
-    assert set(out) == set(feats)
-    for stage_name, feat in feats.items():
-        assert out[stage_name].shape == feat.shape
-    debug = m.debug_state()
-    assert debug["p3_gate"] == pytest.approx(0.001, abs=1e-6)
-    assert debug["p4_gate"] == pytest.approx(0.001, abs=1e-6)
-    assert debug["p5_gate"] == pytest.approx(0.001, abs=1e-6)
-
-
-def test_dual_stream_p2_sgmc_forward_and_debug_state():
-    """SGMC YAML builds a four-scale model and logs per-stage SGMC gate scalars."""
-    from ultralytics.nn.tasks import DualStreamDetectionModel
-
-    model = DualStreamDetectionModel("yolov12-dual-p2-sgmc.yaml", nc=3, verbose=False)
-    model.eval()
-    x = torch.zeros(1, 6, 128, 128)
-    with torch.no_grad():
-        out = model(x)
-    assert out is not None
-    debug = model.adapter_debug_state()
-    assert "sgmc/p3_gate" in debug
-    assert "sgmc/p4_gate" in debug
-    assert "sgmc/p5_gate" in debug
-
-
 @pytest.mark.parametrize(
     ("cfg", "expected_p4_module", "uses_aux_head"),
     (

@@ -6,10 +6,6 @@ nc: 3
 ch: 6
 dual_stream: true
 
-cmg_stages: []
-cma_stages: []
-bidir_cma_stages: []
-bidir_adapter_stages: []
 p2_fusion: dmg_init8d
 dmg_diff_hidden_ratio: 0.25
 dmg_alpha_init: 1.0
