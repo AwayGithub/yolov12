@@ -165,3 +165,29 @@ def test_plain_p2_fair_ablation_cfgs_instantiate_expected_models(cfg, expected_p
         assert "noaux" not in cfg
     else:
         assert "noaux" in cfg
+
+
+def test_single_stream_p2_p3_aux_cfg_instantiates_aux_head():
+    """Single-stream IR P2 config should attach one training-only P3 aux head."""
+    from ultralytics.nn.tasks import DetectionModel
+
+    model = DetectionModel("yolov12-ir-p2-p3aux.yaml", nc=3, verbose=False)
+
+    assert model.yaml["p3_aux"] is True
+    assert model.p3_aux_layer == 4
+    assert model.use_p3_aux is True
+    assert model.aux_head.stride.tolist() == [8.0]
+
+
+def test_single_stream_p2_p3_aux_forward_shape():
+    """Single-stream IR P2 + P3 aux model forwards 480x640 inputs and keeps 4 detection scales."""
+    from ultralytics.nn.tasks import DetectionModel
+
+    model = DetectionModel("yolov12-ir-p2-p3aux.yaml", nc=3, verbose=False)
+    model.eval()
+
+    with torch.no_grad():
+        out = model(torch.zeros(1, 3, 480, 640))
+
+    assert out is not None
+    assert torch.equal(model.stride.sort().values, torch.tensor([4.0, 8.0, 16.0, 32.0]))

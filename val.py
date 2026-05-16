@@ -1,15 +1,136 @@
+# Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
+
 import argparse
-import random
-import time
 from copy import deepcopy
 from pathlib import Path
 
 import torch
+import torch.nn as nn
 import thop
 
 from ultralytics import YOLO
-from ultralytics.utils import yaml_load
 from ultralytics.nn.tasks import DualStreamDetectionModel  # noqa: F401 — 确保自定义类可被 torch.load 反序列化
+from ultralytics.utils import yaml_load
+
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+DEFAULT_DUAL_DATA = "ultralytics/cfg/datasets/RGBT-3M.yaml"
+DEFAULT_IR_FIRE_PERSON_DATA = "ultralytics/cfg/datasets/RGBT-3M-ir-fire-person.yaml"
+INPUT_MODES = {"dual_input", "rgb_input", "ir_input"}
+
+
+def _checkpoint_train_args(yolo_model):
+    """Return training args embedded in a checkpoint, if present."""
+    ckpt = getattr(yolo_model, "ckpt", None)
+    if not isinstance(ckpt, dict):
+        return {}
+    train_args = ckpt.get("train_args", {})
+    return train_args if isinstance(train_args, dict) else {}
+
+
+def _resolve_repo_path(path):
+    """Resolve a CLI/checkpoint path relative to cwd or this script directory."""
+    path = Path(path)
+    if path.is_absolute():
+        return path
+    for base in (Path.cwd(), SCRIPT_DIR):
+        candidate = base / path
+        if candidate.exists():
+            return candidate
+    return SCRIPT_DIR / path
+
+
+def _first_conv_in_channels(yolo_model):
+    """Infer the number of channels expected by the first convolution."""
+    model = getattr(yolo_model, "model", yolo_model)
+    yaml_ch = getattr(model, "yaml", {}).get("ch") if hasattr(model, "yaml") else None
+    for module in model.modules():
+        if isinstance(module, nn.Conv2d):
+            return module.in_channels
+    return yaml_ch
+
+
+def _expects_dual_input(yolo_model):
+    """Return whether the loaded checkpoint expects a 6-channel RGBT tensor."""
+    model = getattr(yolo_model, "model", yolo_model)
+    if isinstance(model, DualStreamDetectionModel) or type(model).__name__ == "DualStreamDetectionModel":
+        return True
+    return _first_conv_in_channels(yolo_model) == 6
+
+
+def _looks_like_ir_checkpoint(args, yolo_model):
+    """Heuristic fallback for old checkpoints without complete train_args."""
+    train_args = _checkpoint_train_args(yolo_model)
+    haystack = " ".join(
+        str(x)
+        for x in (
+            getattr(args, "weights", ""),
+            train_args.get("model", ""),
+            train_args.get("data", ""),
+            train_args.get("name", ""),
+        )
+    ).lower()
+    return "ir" in haystack or "thermal" in haystack or "fire_person" in haystack
+
+
+def _looks_like_rgb_checkpoint(args, yolo_model):
+    """Heuristic fallback for old checkpoints without complete train_args."""
+    train_args = _checkpoint_train_args(yolo_model)
+    haystack = " ".join(
+        str(x)
+        for x in (
+            getattr(args, "weights", ""),
+            train_args.get("model", ""),
+            train_args.get("data", ""),
+            train_args.get("name", ""),
+        )
+    ).lower()
+    return "rgb" in haystack or "visible" in haystack or "vis" in haystack
+
+
+def resolve_data_path(args, yolo_model):
+    """Resolve the validation dataset YAML, preferring checkpoint provenance over legacy defaults."""
+    if args.data:
+        return _resolve_repo_path(args.data)
+
+    train_data = _checkpoint_train_args(yolo_model).get("data")
+    if train_data:
+        return _resolve_repo_path(train_data)
+
+    if not _expects_dual_input(yolo_model) and _looks_like_ir_checkpoint(args, yolo_model):
+        return _resolve_repo_path(DEFAULT_IR_FIRE_PERSON_DATA)
+
+    return _resolve_repo_path(DEFAULT_DUAL_DATA)
+
+
+def load_validation_data_cfg(data_path):
+    """Load a validation dataset YAML from a resolved path."""
+    data_path = Path(data_path)
+    if not data_path.exists():
+        raise FileNotFoundError(f"Dataset config does not exist: {data_path}")
+    return yaml_load(str(data_path))
+
+
+def resolve_input_mode(args, yolo_model, data_cfg):
+    """Resolve input mode, avoiding 6-channel batches for 3-channel single-stream checkpoints."""
+    if args.input_mode != "auto":
+        return args.input_mode
+
+    cfg_mode = data_cfg.get("input_mode", "dual_input")
+    if _expects_dual_input(yolo_model):
+        return "dual_input"
+    if cfg_mode in {"rgb_input", "ir_input"}:
+        return cfg_mode
+    if _looks_like_ir_checkpoint(args, yolo_model):
+        return "ir_input"
+    if _looks_like_rgb_checkpoint(args, yolo_model):
+        return "rgb_input"
+    if _first_conv_in_channels(yolo_model) == 3 and cfg_mode == "dual_input":
+        raise ValueError(
+            "Cannot auto-select rgb_input or ir_input for this 3-channel checkpoint. "
+            "Pass --input_mode ir_input or --input_mode rgb_input explicitly."
+        )
+    return cfg_mode if cfg_mode in INPUT_MODES else "dual_input"
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Evaluate a trained YOLOv12 RGBT model")
@@ -28,16 +149,17 @@ def parse_args():
     )
     parser.add_argument(
         "--input_mode",
+        "--input-mode",
         type=str,
-        default="dual_input",
-        choices=["dual_input", "rgb_input", "ir_input"],
-        help="Input mode for validation (dual_input, rgb_input, ir_input)"
+        default="auto",
+        choices=["auto", "dual_input", "rgb_input", "ir_input"],
+        help="Input mode for validation (auto, dual_input, rgb_input, ir_input)"
     )
     parser.add_argument(
         "--data",
         type=str,
-        default="ultralytics/cfg/datasets/RGBT-3M.yaml",
-        help="Path to dataset configuration yaml"
+        default=None,
+        help="Path to dataset configuration yaml. Defaults to the data YAML saved in the checkpoint."
     )
     parser.add_argument(
         "--imgsz",
@@ -72,14 +194,19 @@ def patch_validator_plot_batches(validator):
 
 if __name__ == "__main__":
     args = parse_args()
-    
-    # 1. 加载并修改数据集配置以支持指定的 input_mode
-    data_cfg = yaml_load(args.data)
-    data_cfg["input_mode"] = args.input_mode
-    
-    # 2. 加载训练好的模型
+
+    # 1. 加载训练好的模型，以便优先使用 checkpoint 中保存的训练配置
     print(f"Loading model from {args.weights}...")
     model = YOLO(args.weights)
+
+    # 2. 加载并修改数据集配置以支持指定的 input_mode
+    data_path = resolve_data_path(args, model)
+    data_cfg = load_validation_data_cfg(data_path)
+    input_mode = resolve_input_mode(args, model, data_cfg)
+    data_cfg["input_mode"] = input_mode
+
+    print(f"Using dataset config: {data_path}")
+    print(f"Using input_mode: {input_mode}")
     
     # 3. 注册回调函数以保存所有图片的检测结果图
     model.add_callback("on_val_batch_start", patch_validator_plot_batches)
@@ -92,7 +219,8 @@ if __name__ == "__main__":
         try:
             m = deepcopy(model.model).cpu()
             stride = max(int(m.stride.max()), 32) if hasattr(m, "stride") else 32
-            im = torch.empty((1, 6, stride, stride))
+            input_channels = 6 if _expects_dual_input(model) or input_mode == "dual_input" else 3
+            im = torch.empty((1, input_channels, stride, stride))
             flops = thop.profile(m, inputs=[im], verbose=False)[0] / 1e9 * 2
             flops = flops * args.imgsz[0] / stride * args.imgsz[1] / stride
         except Exception:
@@ -109,7 +237,7 @@ if __name__ == "__main__":
     print("="*50 + "\n")
 
     # 5. 运行验证
-    print(f"Running validation with input_mode={args.input_mode}...")
+    print(f"Running validation with input_mode={input_mode}...")
     
     # 存储每次推理的速度信息
     all_speeds = []

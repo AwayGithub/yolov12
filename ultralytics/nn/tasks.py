@@ -151,6 +151,8 @@ class BaseModel(nn.Module):
             if profile:
                 self._profile_one_layer(m, x, dt)
             x = m(x)  # run
+            if self.training and getattr(self, "use_p3_aux", False) and m.i == getattr(self, "p3_aux_layer", -1):
+                self._aux_pred = self.aux_head([x])
             y.append(x if m.i in self.save else None)  # save output
             if visualize:
                 feature_visualization(x, m.type, m.i, save_dir=visualize)
@@ -324,6 +326,17 @@ class DetectionModel(BaseModel):
         self.names = {i: f"{i}" for i in range(self.yaml["nc"])}  # default names dict
         self.inplace = self.yaml.get("inplace", True)
         self.end2end = getattr(self.model[-1], "end2end", False)
+        self.use_p3_aux = bool(self.yaml.get("p3_aux", False))
+        self.p3_aux_layer = int(self.yaml.get("p3_aux_layer", 4))
+        self.aux_loss_weight = float(self.yaml.get("aux_loss_weight", 0.25))
+        self._aux_pred = None
+
+        if self.use_p3_aux:
+            c_p3 = self._get_layer_out_channels(self.model[self.p3_aux_layer])
+            self.aux_head = Detect(nc=self.yaml["nc"], ch=[c_p3])
+            self.aux_head.stride = torch.tensor([float(self.yaml.get("p3_aux_stride", 8.0))])
+            self.aux_head.inplace = self.inplace
+            self.aux_head.bias_init()
 
         # Build strides
         m = self.model[-1]  # Detect()
@@ -342,6 +355,7 @@ class DetectionModel(BaseModel):
             m.bias_init()  # only run once
         else:
             self.stride = torch.Tensor([32])  # default stride for i.e. RTDETR
+        self._aux_pred = None
 
         # Init weights, biases
         initialize_weights(self)
@@ -390,7 +404,43 @@ class DetectionModel(BaseModel):
 
     def init_criterion(self):
         """Initialize the loss criterion for the DetectionModel."""
+        if self.use_p3_aux:
+            return SingleStreamDetectionLoss(self, aux_weight=self.aux_loss_weight)
         return E2EDetectLoss(self) if getattr(self, "end2end", False) else v8DetectionLoss(self)
+
+    @staticmethod
+    def _get_layer_out_channels(layer):
+        """Return the output channel count for common YOLO feature layers."""
+        if hasattr(layer, "cv2"):  # C3k2, A2C2f, C2f
+            return layer.cv2.conv.out_channels
+        if hasattr(layer, "conv"):  # Conv
+            return layer.conv.out_channels
+        raise ValueError(f"Cannot determine output channels for {type(layer)}")
+
+
+class SingleStreamDetectionLoss:
+    """Detection loss for DetectionModel with one training-only P3 auxiliary head."""
+
+    def __init__(self, model, aux_weight=0.25):
+        self.aux_weight = aux_weight
+        self._model = model
+        self.main_criterion = v8DetectionLoss(model)
+        self._aux_criterion = v8DetectionLoss(
+            types.SimpleNamespace(
+                model=nn.ModuleList([model.aux_head]),
+                args=model.args,
+                parameters=model.aux_head.parameters,
+            )
+        )
+
+    def __call__(self, preds, batch):
+        """Compute main detection loss plus weighted P3 auxiliary detection loss."""
+        main_loss, main_items = self.main_criterion(preds, batch)
+        if self._model._aux_pred is not None:
+            aux_loss, _ = self._aux_criterion(self._model._aux_pred, batch)
+            main_loss = main_loss + self.aux_weight * aux_loss
+            self._model._aux_pred = None
+        return main_loss, main_items
 
 
 class DualStreamDetectionLoss:
