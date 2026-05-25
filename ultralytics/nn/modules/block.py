@@ -1637,14 +1637,19 @@ class _FreDFTFeedForward(nn.Module):
 class _FreDFTFrequencyAttention(nn.Module):
     """Cross-modal frequency-domain QK attention adapted from FreDFT FDCA."""
 
-    def __init__(self, channels: int):
+    def __init__(self, channels: int, qkv_expand: float = 2.0):
         """Initialize FFT-based cross-modal attention projections."""
         super().__init__()
+        if qkv_expand <= 0:
+            raise ValueError("qkv_expand must be positive.")
+        qkv_channels = max(1, int(channels * qkv_expand))
         self.norm = _FreDFTLayerNorm2d(channels)
-        self.to_hidden = nn.Conv2d(channels, channels * 6, 1, bias=False)
-        self.to_hidden_dw = nn.Conv2d(channels * 6, channels * 6, 3, padding=1, groups=channels * 6, bias=False)
-        self.freq_norm = _FreDFTLayerNorm2d(channels * 2)
-        self.project_out = nn.Conv2d(channels * 2, channels, 1, bias=False)
+        self.to_hidden = nn.Conv2d(channels, qkv_channels * 3, 1, bias=False)
+        self.to_hidden_dw = nn.Conv2d(
+            qkv_channels * 3, qkv_channels * 3, 3, padding=1, groups=qkv_channels * 3, bias=False
+        )
+        self.freq_norm = _FreDFTLayerNorm2d(qkv_channels)
+        self.project_out = nn.Conv2d(qkv_channels, channels, 1, bias=False)
 
     @staticmethod
     def _frequency_gate(q, k):
@@ -1673,14 +1678,14 @@ class FreDFTFusion(nn.Module):
     modality before a FDFTM-style concat projection.
     """
 
-    def __init__(self, channels: int, expansion: float = 3.0):
+    def __init__(self, channels: int, expansion: float = 3.0, qkv_expand: float = 2.0):
         """Initialize a stage-local FreDFT fusion block."""
         super().__init__()
         if channels <= 0:
             raise ValueError("channels must be positive.")
         if expansion <= 0:
             raise ValueError("expansion must be positive.")
-        self.freq_attn = _FreDFTFrequencyAttention(channels)
+        self.freq_attn = _FreDFTFrequencyAttention(channels, qkv_expand=qkv_expand)
         self.norm_rgb = _FreDFTLayerNorm2d(channels)
         self.norm_ir = _FreDFTLayerNorm2d(channels)
         self.ffn = _FreDFTFeedForward(channels, expansion=expansion)

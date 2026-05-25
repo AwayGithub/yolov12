@@ -571,6 +571,7 @@ class DualStreamDetectionModel(DetectionModel):
                 self.fusion_convs[stage_name] = FreDFTFusion(
                     c_out,
                     expansion=float(self.yaml.get("fredft_expansion", 3.0)),
+                    qkv_expand=float(self.yaml.get("fredft_qkv_expand", 2.0)),
                 )
             elif stage_name in self.lif_fusion_stages:
                 self.fusion_convs[stage_name] = M2DLocalIlluminationFusion(
