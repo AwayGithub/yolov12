@@ -61,6 +61,9 @@ from .block import (
     DMGFusion,
     DMGFusionPosAlpha,
     DMGFusionInit8d,
+    M2DLocalIlluminationFusion,
+    M2DLocalIlluminationGate,
+    FreDFTFusion,
 )
 from .conv import (
     CBAM,
@@ -168,4 +171,7 @@ __all__ = (
     "DMGFusion",
     "DMGFusionPosAlpha",
     "DMGFusionInit8d",
+    "M2DLocalIlluminationFusion",
+    "M2DLocalIlluminationGate",
+    "FreDFTFusion",
 )

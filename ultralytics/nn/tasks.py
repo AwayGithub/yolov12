@@ -68,6 +68,9 @@ from ultralytics.nn.modules import (
     DMGFusion,
     DMGFusionPosAlpha,
     DMGFusionInit8d,
+    M2DLocalIlluminationFusion,
+    M2DLocalIlluminationGate,
+    FreDFTFusion,
 )
 from ultralytics.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, colorstr, emojis, yaml_load
 from ultralytics.utils.checks import check_requirements, check_suffix, check_yaml
@@ -528,11 +531,56 @@ class DualStreamDetectionModel(DetectionModel):
                 f"p2_fusion '{_p2_fusion_mode}' is not supported. "
                 "Supported values: plain, dmg, dmg_posalpha, dmg_init8d."
             )
+        _freq_stages = self.yaml.get("freq_fusion_stages", [])
+        if isinstance(_freq_stages, str):
+            _freq_stages = [s.strip() for s in _freq_stages.split(",") if s.strip()]
+        _freq_stages = list(_freq_stages)
+        _valid_freq_stages = {"p3", "p4", "p5"}
+        _unknown_freq_stages = set(_freq_stages) - _valid_freq_stages
+        if _unknown_freq_stages:
+            raise ValueError(
+                f"freq_fusion_stages contains unsupported stages: {sorted(_unknown_freq_stages)}. "
+                "Supported values: p3, p4, p5."
+            )
+        self.freq_fusion_stages = set(_freq_stages)
+
+        _lif_stages = self.yaml.get("lif_fusion_stages", [])
+        if isinstance(_lif_stages, str):
+            _lif_stages = [s.strip() for s in _lif_stages.split(",") if s.strip()]
+        _lif_stages = list(_lif_stages)
+        _valid_lif_stages = {"p3", "p4", "p5"}
+        _unknown_lif_stages = set(_lif_stages) - _valid_lif_stages
+        if _unknown_lif_stages:
+            raise ValueError(
+                f"lif_fusion_stages contains unsupported stages: {sorted(_unknown_lif_stages)}. "
+                "Supported values: p3, p4, p5."
+            )
+        _overlapped_stages = set(_lif_stages) & self.freq_fusion_stages
+        if _overlapped_stages:
+            raise ValueError(
+                f"lif_fusion_stages and freq_fusion_stages overlap at {sorted(_overlapped_stages)}. "
+                "Use one fusion innovation per stage."
+            )
+        self.lif_fusion_stages = set(_lif_stages)
+        self.lif_gate = M2DLocalIlluminationGate() if self.lif_fusion_stages else None
 
         self.fusion_convs = nn.ModuleDict()
         for stage_name, layer_idx in self.FUSION_LAYER_INDICES.items():
             c_out = self._get_layer_out_channels(self.backbone_rgb[layer_idx])
-            if stage_name == "p2" and _p2_fusion_mode == "dmg":
+            if stage_name in self.freq_fusion_stages:
+                self.fusion_convs[stage_name] = FreDFTFusion(
+                    c_out,
+                    expansion=float(self.yaml.get("fredft_expansion", 3.0)),
+                )
+            elif stage_name in self.lif_fusion_stages:
+                self.fusion_convs[stage_name] = M2DLocalIlluminationFusion(
+                    stage_name,
+                    beta=float(self.yaml.get("lif_beta", 0.4)),
+                    offset=float(self.yaml.get("lif_offset", 0.31)),
+                    scale=float(self.yaml.get("lif_scale", 0.63)),
+                    max_step=float(self.yaml.get("lif_max_step", 0.5)),
+                )
+            elif stage_name == "p2" and _p2_fusion_mode == "dmg":
                 self.fusion_convs[stage_name] = DMGFusion(c_out)
             elif stage_name == "p2" and _p2_fusion_mode == "dmg_posalpha":
                 self.fusion_convs[stage_name] = DMGFusionPosAlpha(
@@ -648,6 +696,7 @@ class DualStreamDetectionModel(DetectionModel):
         x_rgb = x[:, 3:, ...]   # 3:6 = VIS_RGB
 
         feats_rgb, feats_ir = self._forward_both_backbones(x_rgb, x_ir)
+        lif_illumination = self.lif_gate(x_rgb) if self.lif_gate is not None else None
 
         if self.training and getattr(self, "use_aux_head", True):
             self._aux_rgb = self.aux_head_rgb([feats_rgb["p3"]])
@@ -657,14 +706,12 @@ class DualStreamDetectionModel(DetectionModel):
         for stage_name in self.FUSION_LAYER_INDICES:
             r, i = feats_rgb[stage_name], feats_ir[stage_name]
             fc = self.fusion_convs[stage_name]
-            fused[stage_name] = (
-                fc(r, i)
-                if isinstance(
-                    fc,
-                    (DMGFusion, DMGFusionPosAlpha, DMGFusionInit8d),
-                )
-                else fc(torch.cat([r, i], dim=1))
-            )
+            if isinstance(fc, M2DLocalIlluminationFusion):
+                fused[stage_name] = fc(r, i, lif_illumination)
+            elif isinstance(fc, (DMGFusion, DMGFusionPosAlpha, DMGFusionInit8d, FreDFTFusion)):
+                fused[stage_name] = fc(r, i)
+            else:
+                fused[stage_name] = fc(torch.cat([r, i], dim=1))
 
         # 构造 y 列表供 head 使用跳连索引
         y = [None] * (max(self.FUSION_LAYER_INDICES.values()) + 1)
@@ -1403,7 +1450,7 @@ def guess_model_scale(model_path):
         (str): The size character of the model's scale, which can be n, s, m, l, or x.
     """
     try:
-        return re.search(r"yolo[v]?\d+([nslmx])", Path(model_path).stem).group(1)  # noqa, returns n, s, m, l, or x
+        return re.search(r"yolo[v]?\d+([nslmx])", Path(model_path).stem).group(1)  # returns n, s, m, l, or x
     except AttributeError:
         return ""
 
