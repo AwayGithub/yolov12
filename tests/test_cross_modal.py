@@ -40,7 +40,7 @@ def test_fredft_fusion_output_shape_and_gradients():
     """FreDFTFusion preserves shape and trains cross-modal QK plus dilated FFN paths."""
     from ultralytics.nn.modules.block import FreDFTFusion
 
-    m = FreDFTFusion(channels=64, expansion=3.0)
+    m = FreDFTFusion(channels=64, expansion=1.0, qkv_expand=1.0)
     x_rgb = torch.randn(2, 64, 20, 24, requires_grad=True)
     x_ir = torch.randn(2, 64, 20, 24, requires_grad=True)
 
@@ -56,14 +56,15 @@ def test_fredft_fusion_output_shape_and_gradients():
 
 
 def test_fredft_fusion_uses_cross_qk_dilated_ffn_structure():
-    """FreDFTFusion should use C->6C attention, 3C dilated FFN, and no outer scale residual."""
+    """FreDFTFusion should allow C->3C attention, 1C dilated FFN, and no outer scale residual."""
     from ultralytics.nn.modules.block import FreDFTFusion
 
     channels = 64
-    m = FreDFTFusion(channels=channels, expansion=3.0)
+    m = FreDFTFusion(channels=channels, expansion=1.0, qkv_expand=1.0)
+    expected_ffn_hidden = channels + (-channels) % 3
 
-    assert m.freq_attn.to_hidden.out_channels == channels * 6
-    assert m.ffn.project_in.out_channels == channels * 3
+    assert m.freq_attn.to_hidden.out_channels == channels * 3
+    assert m.ffn.project_in.out_channels == expected_ffn_hidden
     assert m.ffn.dwconv_d1.dilation == (1, 1)
     assert m.ffn.dwconv_d2.dilation == (2, 2)
     assert m.ffn.dwconv_d3.dilation == (3, 3)
@@ -176,7 +177,8 @@ def test_dual_stream_fredft_p3_cfg_extends_confirmed_dmg_init8d_baseline():
     assert model.yaml["dmg_alpha_init"] == pytest.approx(1.0)
     assert model.yaml["dmg_beta_init"] == pytest.approx(-0.1)
     assert model.yaml["freq_fusion_stages"] == ["p3"]
-    assert model.yaml["fredft_expansion"] == pytest.approx(3.0)
+    assert model.yaml["fredft_expansion"] == pytest.approx(1.0)
+    assert model.yaml["fredft_qkv_expand"] == pytest.approx(1.0)
     assert isinstance(model.fusion_convs["p2"], DMGFusionInit8d)
     assert model.fusion_convs["p2"].alpha.item() == pytest.approx(1.0)
     assert model.fusion_convs["p2"].beta.item() == pytest.approx(-0.1)
@@ -209,7 +211,8 @@ def test_fredft_stage_sweep_cfgs_extend_dmg_init8d_p3aux_baseline(cfg, expected_
     assert model.yaml["dmg_alpha_init"] == pytest.approx(1.0)
     assert model.yaml["dmg_beta_init"] == pytest.approx(-0.1)
     assert model.yaml["freq_fusion_stages"] == expected_stages
-    assert model.yaml["fredft_expansion"] == pytest.approx(3.0)
+    assert model.yaml["fredft_expansion"] == pytest.approx(1.0)
+    assert model.yaml["fredft_qkv_expand"] == pytest.approx(1.0)
     assert model.yaml["backbone"][6][2] == "A2C2f"
     assert isinstance(model.fusion_convs["p2"], DMGFusionInit8d)
     assert model.fusion_convs["p2"].alpha.item() == pytest.approx(1.0)
@@ -217,6 +220,12 @@ def test_fredft_stage_sweep_cfgs_extend_dmg_init8d_p3aux_baseline(cfg, expected_
     for stage_name in ("p3", "p4", "p5"):
         expected_type = FreDFTFusion if stage_name in expected_stages else Conv
         assert isinstance(model.fusion_convs[stage_name], expected_type)
+        if stage_name in expected_stages:
+            fusion = model.fusion_convs[stage_name]
+            channels = fusion.freq_attn.to_hidden.in_channels
+            expected_ffn_hidden = channels + (-channels) % 3
+            assert fusion.freq_attn.to_hidden.out_channels == channels * 3
+            assert fusion.ffn.project_in.out_channels == expected_ffn_hidden
     assert model.use_aux_head is True
     assert "cmg_stages" not in model.yaml
     assert "cma_stages" not in model.yaml
