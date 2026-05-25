@@ -68,6 +68,9 @@ from ultralytics.nn.modules import (
     DMGFusion,
     DMGFusionPosAlpha,
     DMGFusionInit8d,
+    M2DLocalIlluminationFusion,
+    M2DLocalIlluminationGate,
+    FreDFTFusion,
 )
 from ultralytics.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, colorstr, emojis, yaml_load
 from ultralytics.utils.checks import check_requirements, check_suffix, check_yaml
@@ -151,6 +154,8 @@ class BaseModel(nn.Module):
             if profile:
                 self._profile_one_layer(m, x, dt)
             x = m(x)  # run
+            if self.training and getattr(self, "use_p3_aux", False) and m.i == getattr(self, "p3_aux_layer", -1):
+                self._aux_pred = self.aux_head([x])
             y.append(x if m.i in self.save else None)  # save output
             if visualize:
                 feature_visualization(x, m.type, m.i, save_dir=visualize)
@@ -324,6 +329,17 @@ class DetectionModel(BaseModel):
         self.names = {i: f"{i}" for i in range(self.yaml["nc"])}  # default names dict
         self.inplace = self.yaml.get("inplace", True)
         self.end2end = getattr(self.model[-1], "end2end", False)
+        self.use_p3_aux = bool(self.yaml.get("p3_aux", False))
+        self.p3_aux_layer = int(self.yaml.get("p3_aux_layer", 4))
+        self.aux_loss_weight = float(self.yaml.get("aux_loss_weight", 0.25))
+        self._aux_pred = None
+
+        if self.use_p3_aux:
+            c_p3 = self._get_layer_out_channels(self.model[self.p3_aux_layer])
+            self.aux_head = Detect(nc=self.yaml["nc"], ch=[c_p3])
+            self.aux_head.stride = torch.tensor([float(self.yaml.get("p3_aux_stride", 8.0))])
+            self.aux_head.inplace = self.inplace
+            self.aux_head.bias_init()
 
         # Build strides
         m = self.model[-1]  # Detect()
@@ -342,6 +358,7 @@ class DetectionModel(BaseModel):
             m.bias_init()  # only run once
         else:
             self.stride = torch.Tensor([32])  # default stride for i.e. RTDETR
+        self._aux_pred = None
 
         # Init weights, biases
         initialize_weights(self)
@@ -390,7 +407,43 @@ class DetectionModel(BaseModel):
 
     def init_criterion(self):
         """Initialize the loss criterion for the DetectionModel."""
+        if self.use_p3_aux:
+            return SingleStreamDetectionLoss(self, aux_weight=self.aux_loss_weight)
         return E2EDetectLoss(self) if getattr(self, "end2end", False) else v8DetectionLoss(self)
+
+    @staticmethod
+    def _get_layer_out_channels(layer):
+        """Return the output channel count for common YOLO feature layers."""
+        if hasattr(layer, "cv2"):  # C3k2, A2C2f, C2f
+            return layer.cv2.conv.out_channels
+        if hasattr(layer, "conv"):  # Conv
+            return layer.conv.out_channels
+        raise ValueError(f"Cannot determine output channels for {type(layer)}")
+
+
+class SingleStreamDetectionLoss:
+    """Detection loss for DetectionModel with one training-only P3 auxiliary head."""
+
+    def __init__(self, model, aux_weight=0.25):
+        self.aux_weight = aux_weight
+        self._model = model
+        self.main_criterion = v8DetectionLoss(model)
+        self._aux_criterion = v8DetectionLoss(
+            types.SimpleNamespace(
+                model=nn.ModuleList([model.aux_head]),
+                args=model.args,
+                parameters=model.aux_head.parameters,
+            )
+        )
+
+    def __call__(self, preds, batch):
+        """Compute main detection loss plus weighted P3 auxiliary detection loss."""
+        main_loss, main_items = self.main_criterion(preds, batch)
+        if self._model._aux_pred is not None:
+            aux_loss, _ = self._aux_criterion(self._model._aux_pred, batch)
+            main_loss = main_loss + self.aux_weight * aux_loss
+            self._model._aux_pred = None
+        return main_loss, main_items
 
 
 class DualStreamDetectionLoss:
@@ -478,11 +531,56 @@ class DualStreamDetectionModel(DetectionModel):
                 f"p2_fusion '{_p2_fusion_mode}' is not supported. "
                 "Supported values: plain, dmg, dmg_posalpha, dmg_init8d."
             )
+        _freq_stages = self.yaml.get("freq_fusion_stages", [])
+        if isinstance(_freq_stages, str):
+            _freq_stages = [s.strip() for s in _freq_stages.split(",") if s.strip()]
+        _freq_stages = list(_freq_stages)
+        _valid_freq_stages = {"p3", "p4", "p5"}
+        _unknown_freq_stages = set(_freq_stages) - _valid_freq_stages
+        if _unknown_freq_stages:
+            raise ValueError(
+                f"freq_fusion_stages contains unsupported stages: {sorted(_unknown_freq_stages)}. "
+                "Supported values: p3, p4, p5."
+            )
+        self.freq_fusion_stages = set(_freq_stages)
+
+        _lif_stages = self.yaml.get("lif_fusion_stages", [])
+        if isinstance(_lif_stages, str):
+            _lif_stages = [s.strip() for s in _lif_stages.split(",") if s.strip()]
+        _lif_stages = list(_lif_stages)
+        _valid_lif_stages = {"p3", "p4", "p5"}
+        _unknown_lif_stages = set(_lif_stages) - _valid_lif_stages
+        if _unknown_lif_stages:
+            raise ValueError(
+                f"lif_fusion_stages contains unsupported stages: {sorted(_unknown_lif_stages)}. "
+                "Supported values: p3, p4, p5."
+            )
+        _overlapped_stages = set(_lif_stages) & self.freq_fusion_stages
+        if _overlapped_stages:
+            raise ValueError(
+                f"lif_fusion_stages and freq_fusion_stages overlap at {sorted(_overlapped_stages)}. "
+                "Use one fusion innovation per stage."
+            )
+        self.lif_fusion_stages = set(_lif_stages)
+        self.lif_gate = M2DLocalIlluminationGate() if self.lif_fusion_stages else None
 
         self.fusion_convs = nn.ModuleDict()
         for stage_name, layer_idx in self.FUSION_LAYER_INDICES.items():
             c_out = self._get_layer_out_channels(self.backbone_rgb[layer_idx])
-            if stage_name == "p2" and _p2_fusion_mode == "dmg":
+            if stage_name in self.freq_fusion_stages:
+                self.fusion_convs[stage_name] = FreDFTFusion(
+                    c_out,
+                    expansion=float(self.yaml.get("fredft_expansion", 3.0)),
+                )
+            elif stage_name in self.lif_fusion_stages:
+                self.fusion_convs[stage_name] = M2DLocalIlluminationFusion(
+                    stage_name,
+                    beta=float(self.yaml.get("lif_beta", 0.4)),
+                    offset=float(self.yaml.get("lif_offset", 0.31)),
+                    scale=float(self.yaml.get("lif_scale", 0.63)),
+                    max_step=float(self.yaml.get("lif_max_step", 0.5)),
+                )
+            elif stage_name == "p2" and _p2_fusion_mode == "dmg":
                 self.fusion_convs[stage_name] = DMGFusion(c_out)
             elif stage_name == "p2" and _p2_fusion_mode == "dmg_posalpha":
                 self.fusion_convs[stage_name] = DMGFusionPosAlpha(
@@ -598,6 +696,7 @@ class DualStreamDetectionModel(DetectionModel):
         x_rgb = x[:, 3:, ...]   # 3:6 = VIS_RGB
 
         feats_rgb, feats_ir = self._forward_both_backbones(x_rgb, x_ir)
+        lif_illumination = self.lif_gate(x_rgb) if self.lif_gate is not None else None
 
         if self.training and getattr(self, "use_aux_head", True):
             self._aux_rgb = self.aux_head_rgb([feats_rgb["p3"]])
@@ -607,14 +706,12 @@ class DualStreamDetectionModel(DetectionModel):
         for stage_name in self.FUSION_LAYER_INDICES:
             r, i = feats_rgb[stage_name], feats_ir[stage_name]
             fc = self.fusion_convs[stage_name]
-            fused[stage_name] = (
-                fc(r, i)
-                if isinstance(
-                    fc,
-                    (DMGFusion, DMGFusionPosAlpha, DMGFusionInit8d),
-                )
-                else fc(torch.cat([r, i], dim=1))
-            )
+            if isinstance(fc, M2DLocalIlluminationFusion):
+                fused[stage_name] = fc(r, i, lif_illumination)
+            elif isinstance(fc, (DMGFusion, DMGFusionPosAlpha, DMGFusionInit8d, FreDFTFusion)):
+                fused[stage_name] = fc(r, i)
+            else:
+                fused[stage_name] = fc(torch.cat([r, i], dim=1))
 
         # 构造 y 列表供 head 使用跳连索引
         y = [None] * (max(self.FUSION_LAYER_INDICES.values()) + 1)
@@ -1353,7 +1450,7 @@ def guess_model_scale(model_path):
         (str): The size character of the model's scale, which can be n, s, m, l, or x.
     """
     try:
-        return re.search(r"yolo[v]?\d+([nslmx])", Path(model_path).stem).group(1)  # noqa, returns n, s, m, l, or x
+        return re.search(r"yolo[v]?\d+([nslmx])", Path(model_path).stem).group(1)  # returns n, s, m, l, or x
     except AttributeError:
         return ""
 

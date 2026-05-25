@@ -36,6 +36,63 @@ def test_dmg_fusion_param_count():
     assert n_params < 20_000, f"Too many params: {n_params} (expected < 20K)"
 
 
+def test_fredft_fusion_output_shape_and_gradients():
+    """FreDFTFusion preserves shape and trains cross-modal QK plus dilated FFN paths."""
+    from ultralytics.nn.modules.block import FreDFTFusion
+
+    m = FreDFTFusion(channels=64, expansion=3.0)
+    x_rgb = torch.randn(2, 64, 20, 24, requires_grad=True)
+    x_ir = torch.randn(2, 64, 20, 24, requires_grad=True)
+
+    out = m(x_rgb, x_ir)
+    out.mean().backward()
+
+    assert out.shape == x_rgb.shape
+    assert x_rgb.grad is not None
+    assert x_ir.grad is not None
+    assert m.freq_attn.to_hidden.weight.grad is not None
+    assert m.ffn.project_in.weight.grad is not None
+    assert m.fuse.weight.grad is not None
+
+
+def test_fredft_fusion_uses_cross_qk_dilated_ffn_structure():
+    """FreDFTFusion should use C->6C attention, 3C dilated FFN, and no outer scale residual."""
+    from ultralytics.nn.modules.block import FreDFTFusion
+
+    channels = 64
+    m = FreDFTFusion(channels=channels, expansion=3.0)
+
+    assert m.freq_attn.to_hidden.out_channels == channels * 6
+    assert m.ffn.project_in.out_channels == channels * 3
+    assert m.ffn.dwconv_d1.dilation == (1, 1)
+    assert m.ffn.dwconv_d2.dilation == (2, 2)
+    assert m.ffn.dwconv_d3.dilation == (3, 3)
+    assert not hasattr(m, "plain_fuse")
+    assert not hasattr(m, "freq_fuse")
+    assert not hasattr(m, "freq_scale")
+
+
+def test_m2d_lifusion_uses_rgb_illumination_map_and_backprops():
+    """M2D-LIF-style fusion uses an RGB-derived illumination map and preserves feature shape."""
+    from ultralytics.nn.modules.block import M2DLocalIlluminationFusion, M2DLocalIlluminationGate
+
+    gate = M2DLocalIlluminationGate()
+    fusion = M2DLocalIlluminationFusion(stage="p4")
+    x_rgb_image = torch.randn(2, 3, 480, 640, requires_grad=True)
+    illum = gate(x_rgb_image)
+
+    x_rgb = torch.randn(2, 64, 30, 40, requires_grad=True)
+    x_ir = torch.randn(2, 64, 30, 40, requires_grad=True)
+    out = fusion(x_rgb, x_ir, illum)
+    out.mean().backward()
+
+    assert illum.shape == (2, 1, 60, 80)
+    assert out.shape == x_rgb.shape
+    assert x_rgb_image.grad is not None
+    assert x_rgb.grad is not None
+    assert x_ir.grad is not None
+
+
 def test_dmg_posalpha_bounds_alpha():
     """DMGFusionPosAlpha keeps differential gain non-negative and bounded."""
     from ultralytics.nn.modules.block import DMGFusionPosAlpha
@@ -107,6 +164,90 @@ def test_dual_stream_p2_uses_dmg_fusion():
         "fusion_convs['p2'] should be DMGFusion when p2_fusion=dmg"
 
 
+def test_dual_stream_fredft_p3_cfg_extends_confirmed_dmg_init8d_baseline():
+    """FreDFT config should extend P3 aux + P2 DMG Init8d, without CMG/CMA."""
+    from ultralytics.nn.modules.block import DMGFusionInit8d, FreDFTFusion
+    from ultralytics.nn.modules.conv import Conv
+    from ultralytics.nn.tasks import DualStreamDetectionModel
+
+    model = DualStreamDetectionModel("yolov12-dual-p2-fredft-p3.yaml", nc=3, verbose=False)
+
+    assert model.yaml["p2_fusion"] == "dmg_init8d"
+    assert model.yaml["dmg_alpha_init"] == pytest.approx(1.0)
+    assert model.yaml["dmg_beta_init"] == pytest.approx(-0.1)
+    assert model.yaml["freq_fusion_stages"] == ["p3"]
+    assert model.yaml["fredft_expansion"] == pytest.approx(3.0)
+    assert isinstance(model.fusion_convs["p2"], DMGFusionInit8d)
+    assert model.fusion_convs["p2"].alpha.item() == pytest.approx(1.0)
+    assert model.fusion_convs["p2"].beta.item() == pytest.approx(-0.1)
+    assert isinstance(model.fusion_convs["p3"], FreDFTFusion)
+    assert isinstance(model.fusion_convs["p4"], Conv)
+    assert isinstance(model.fusion_convs["p5"], Conv)
+    assert model.use_aux_head is True
+    assert "cmg_stages" not in model.yaml
+    assert "cma_stages" not in model.yaml
+    assert "fredft_scale_init" not in model.yaml
+
+
+@pytest.mark.parametrize(
+    ("cfg", "expected_stages"),
+    (
+        ("yolov12-dual-p2-dmg-init8d-p3aux-fredft-p3.yaml", ["p3"]),
+        ("yolov12-dual-p2-dmg-init8d-p3aux-fredft-p3p4.yaml", ["p3", "p4"]),
+        ("yolov12-dual-p2-dmg-init8d-p3aux-fredft-p3p4p5.yaml", ["p3", "p4", "p5"]),
+    ),
+)
+def test_fredft_stage_sweep_cfgs_extend_dmg_init8d_p3aux_baseline(cfg, expected_stages):
+    """FreDFT stage-sweep configs should only vary frequency fusion stages."""
+    from ultralytics.nn.modules.block import DMGFusionInit8d, FreDFTFusion
+    from ultralytics.nn.modules.conv import Conv
+    from ultralytics.nn.tasks import DualStreamDetectionModel
+
+    model = DualStreamDetectionModel(cfg, nc=3, verbose=False)
+
+    assert model.yaml["p2_fusion"] == "dmg_init8d"
+    assert model.yaml["dmg_alpha_init"] == pytest.approx(1.0)
+    assert model.yaml["dmg_beta_init"] == pytest.approx(-0.1)
+    assert model.yaml["freq_fusion_stages"] == expected_stages
+    assert model.yaml["fredft_expansion"] == pytest.approx(3.0)
+    assert model.yaml["backbone"][6][2] == "A2C2f"
+    assert isinstance(model.fusion_convs["p2"], DMGFusionInit8d)
+    assert model.fusion_convs["p2"].alpha.item() == pytest.approx(1.0)
+    assert model.fusion_convs["p2"].beta.item() == pytest.approx(-0.1)
+    for stage_name in ("p3", "p4", "p5"):
+        expected_type = FreDFTFusion if stage_name in expected_stages else Conv
+        assert isinstance(model.fusion_convs[stage_name], expected_type)
+    assert model.use_aux_head is True
+    assert "cmg_stages" not in model.yaml
+    assert "cma_stages" not in model.yaml
+    assert "fredft_scale_init" not in model.yaml
+
+
+def test_dual_stream_m2d_lif_p4_cfg_extends_confirmed_dmg_init8d_baseline():
+    """M2D-LIF config should add illumination-aware fusion at P4 only."""
+    from ultralytics.nn.modules.block import DMGFusionInit8d, M2DLocalIlluminationFusion
+    from ultralytics.nn.modules.conv import Conv
+    from ultralytics.nn.tasks import DualStreamDetectionModel
+
+    model = DualStreamDetectionModel("yolov12-dual-p2-m2dlif-p4.yaml", nc=3, verbose=False)
+
+    assert model.yaml["p2_fusion"] == "dmg_init8d"
+    assert model.yaml["dmg_alpha_init"] == pytest.approx(1.0)
+    assert model.yaml["dmg_beta_init"] == pytest.approx(-0.1)
+    assert model.yaml["lif_fusion_stages"] == ["p4"]
+    assert isinstance(model.fusion_convs["p2"], DMGFusionInit8d)
+    assert model.fusion_convs["p2"].alpha.item() == pytest.approx(1.0)
+    assert model.fusion_convs["p2"].beta.item() == pytest.approx(-0.1)
+    assert isinstance(model.fusion_convs["p3"], Conv)
+    assert isinstance(model.fusion_convs["p4"], M2DLocalIlluminationFusion)
+    assert isinstance(model.fusion_convs["p5"], Conv)
+    assert hasattr(model, "lif_gate")
+    assert model.use_aux_head is True
+    assert "freq_fusion_stages" not in model.yaml
+    assert "cmg_stages" not in model.yaml
+    assert "cma_stages" not in model.yaml
+
+
 @pytest.mark.parametrize(
     ("cfg", "expected_type"),
     (
@@ -165,3 +306,29 @@ def test_plain_p2_fair_ablation_cfgs_instantiate_expected_models(cfg, expected_p
         assert "noaux" not in cfg
     else:
         assert "noaux" in cfg
+
+
+def test_single_stream_p2_p3_aux_cfg_instantiates_aux_head():
+    """Single-stream IR P2 config should attach one training-only P3 aux head."""
+    from ultralytics.nn.tasks import DetectionModel
+
+    model = DetectionModel("yolov12-ir-p2-p3aux.yaml", nc=3, verbose=False)
+
+    assert model.yaml["p3_aux"] is True
+    assert model.p3_aux_layer == 4
+    assert model.use_p3_aux is True
+    assert model.aux_head.stride.tolist() == [8.0]
+
+
+def test_single_stream_p2_p3_aux_forward_shape():
+    """Single-stream IR P2 + P3 aux model forwards 480x640 inputs and keeps 4 detection scales."""
+    from ultralytics.nn.tasks import DetectionModel
+
+    model = DetectionModel("yolov12-ir-p2-p3aux.yaml", nc=3, verbose=False)
+    model.eval()
+
+    with torch.no_grad():
+        out = model(torch.zeros(1, 3, 480, 640))
+
+    assert out is not None
+    assert torch.equal(model.stride.sort().values, torch.tensor([4.0, 8.0, 16.0, 32.0]))

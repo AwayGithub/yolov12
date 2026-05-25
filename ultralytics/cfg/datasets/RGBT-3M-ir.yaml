@@ -1,0 +1,21 @@
+# Ultralytics YOLO RGBT-3M IR-only configuration
+
+name: RGBT-3M
+path: e:\Yan-Unifiles\lab\exp\yolov12\RGBT-3M
+
+train: train.txt
+val: val.txt
+
+nc: 3
+names:
+  0: smoke
+  1: fire
+  2: person
+
+input_channels: 6
+input_mode: ir_input
+rgb_dir: RGB
+thermal_dir: IR
+label_dir: labels
+img_size: [480, 640]
+format: yolo

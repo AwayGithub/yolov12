@@ -1,6 +1,7 @@
 # Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
 """Block modules."""
 
+import logging
 import math
 import torch
 import torch.nn as nn
@@ -54,7 +55,12 @@ __all__ = (
     "DMGFusion",
     "DMGFusionPosAlpha",
     "DMGFusionInit8d",
+    "M2DLocalIlluminationGate",
+    "M2DLocalIlluminationFusion",
+    "FreDFTFusion",
 )
+
+logger = logging.getLogger(__name__)
 
 
 class DFL(nn.Module):
@@ -1161,20 +1167,14 @@ class TorchVision(nn.Module):
             y = self.m(x)
         return y
 
-import logging
-logger = logging.getLogger(__name__)
-
 USE_FLASH_ATTN = False
 try:
-    import torch
     if torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 8:  # Ampere or newer
         from flash_attn.flash_attn_interface import flash_attn_func
         USE_FLASH_ATTN = True
     else:
-        from torch.nn.functional import scaled_dot_product_attention as sdpa
         logger.warning("FlashAttention is not available on this device. Using scaled_dot_product_attention instead.")
 except Exception:
-    from torch.nn.functional import scaled_dot_product_attention as sdpa
     logger.warning("FlashAttention is not available on this device. Using scaled_dot_product_attention instead.")
 
 class AAttn(nn.Module):
@@ -1501,3 +1501,197 @@ class DMGFusionInit8d(DMGFusion):
         super().__init__(channels=channels, diff_hidden_ratio=diff_hidden_ratio)
         self.alpha.data.fill_(float(alpha_init))
         self.beta.data.fill_(float(beta_init))
+
+
+class M2DLocalIlluminationGate(nn.Module):
+    """RGB-image illumination map generator adapted from M2D-LIF's LIF block.
+
+    The official M2D-LIF implementation predicts one low-resolution weight map
+    from the RGB image, then reuses it to blend RGB/IR feature stages. This gate
+    preserves that contract and returns a stride-8 map for 480x640 inputs.
+    """
+
+    def __init__(self, hidden_channels=(32, 64, 64)):
+        """Initialize the three pooled convolution stages used by M2D-LIF."""
+        super().__init__()
+        c1, c2, c3 = hidden_channels
+        self.conv1 = Conv(3, c1, k=3, p=1)
+        self.conv2 = Conv(c1, c2, k=3, p=1)
+        self.conv3 = Conv(c2, c3, k=3, p=1)
+        self.conv4 = Conv(c3, 1, k=1, p=0, act=False)
+        self.pool = nn.AvgPool2d(kernel_size=2, stride=2)
+
+    def forward(self, x_rgb):
+        """Return a non-negative RGB-derived illumination map at stride 8."""
+        x = self.pool(self.conv1(x_rgb))
+        x = self.pool(self.conv2(x))
+        x = self.pool(self.conv3(x))
+        return F.relu(self.conv4(x), inplace=True)
+
+
+class M2DLocalIlluminationFusion(nn.Module):
+    """M2D-LIF-style local illumination-aware RGB/IR feature fusion.
+
+    Args:
+        stage (str): Feature stage name, one of p3, p4, or p5.
+        beta (float): Original M2D-LIF scaling coefficient for the centered
+            illumination map. Default 0.4.
+        offset (float): Original illumination offset. Default 0.31.
+        scale (float): Original illumination normalization scale. Default 0.63.
+        max_step (float): Upper clamp on normalized illumination. Default 0.5.
+    """
+
+    def __init__(
+        self,
+        stage: str,
+        beta: float = 0.4,
+        offset: float = 0.31,
+        scale: float = 0.63,
+        max_step: float = 0.5,
+    ):
+        """Initialize a stage-specific weighted-add fusion block."""
+        super().__init__()
+        if stage not in {"p3", "p4", "p5"}:
+            raise ValueError("stage must be one of: p3, p4, p5.")
+        if scale <= 0:
+            raise ValueError("scale must be positive.")
+        self.stage = stage
+        self.beta = float(beta)
+        self.offset = float(offset)
+        self.scale = float(scale)
+        self.max_step = float(max_step)
+
+    def _resize_illumination(self, illumination, size):
+        """Resize the stride-8 illumination map to the feature map size."""
+        if illumination.shape[-2:] == size:
+            return illumination
+        h, w = illumination.shape[-2:]
+        target_h, target_w = size
+        if h >= target_h and w >= target_w and h % target_h == 0 and w % target_w == 0:
+            return F.avg_pool2d(illumination, kernel_size=(h // target_h, w // target_w))
+        return F.interpolate(illumination, size=size, mode="bilinear", align_corners=False)
+
+    def forward(self, x_rgb, x_ir, illumination):
+        """Blend RGB and IR features with an RGB-derived local illumination weight."""
+        weight = self._resize_illumination(illumination, x_rgb.shape[-2:])
+        weight = torch.clamp((weight - self.offset) / self.scale, max=self.max_step)
+        weight_rgb = 0.5 + self.beta * weight
+        weight_ir = 1.0 - weight_rgb
+        return weight_rgb * x_rgb + weight_ir * x_ir
+
+
+class _FreDFTLayerNorm2d(nn.Module):
+    """Channel-wise LayerNorm for BCHW feature maps."""
+
+    def __init__(self, channels: int, eps: float = 1e-5):
+        """Initialize LayerNorm over the channel dimension of each spatial location."""
+        super().__init__()
+        self.norm = nn.LayerNorm(channels, eps=eps)
+
+    def forward(self, x):
+        """Normalize a BCHW tensor over C at each HxW location."""
+        return self.norm(x.permute(0, 2, 3, 1)).permute(0, 3, 1, 2).contiguous()
+
+
+class _FreDFTFeedForward(nn.Module):
+    """Spatial dilated split-exchange feed-forward layer adapted from FreDFT FDFFN."""
+
+    def __init__(self, channels: int, expansion: float = 3.0):
+        """Initialize multi-dilation depthwise branches with channel exchange."""
+        super().__init__()
+        hidden = max(3, int(channels * expansion))
+        hidden += (-hidden) % 3
+        self.project_in = nn.Conv2d(channels, hidden, 1, bias=False)
+        self.dwconv_d1 = nn.Conv2d(hidden, hidden, 3, padding=1, dilation=1, groups=hidden, bias=False)
+        self.dwconv_d2 = nn.Conv2d(hidden, hidden, 3, padding=2, dilation=2, groups=hidden, bias=False)
+        self.dwconv_d3 = nn.Conv2d(hidden, hidden, 3, padding=3, dilation=3, groups=hidden, bias=False)
+        self.dwconv_d1_out = nn.Conv2d(hidden, hidden, 3, padding=1, dilation=1, groups=hidden, bias=False)
+        self.dwconv_d2_out = nn.Conv2d(hidden, hidden, 3, padding=2, dilation=2, groups=hidden, bias=False)
+        self.dwconv_d3_out = nn.Conv2d(hidden, hidden, 3, padding=3, dilation=3, groups=hidden, bias=False)
+        self.project_out = nn.Conv2d(hidden * 3, channels, 1, bias=False)
+
+    @staticmethod
+    def _split_exchange(x1, x2, x3):
+        """Swap equal channel groups across three spatial dilation branches."""
+        x1a, x1b, x1c = x1.chunk(3, dim=1)
+        x2a, x2b, x2c = x2.chunk(3, dim=1)
+        x3a, x3b, x3c = x3.chunk(3, dim=1)
+        y1 = torch.cat([x1a, x2a, x3a], dim=1)
+        y2 = torch.cat([x1b, x2b, x3b], dim=1)
+        y3 = torch.cat([x1c, x2c, x3c], dim=1)
+        return y1, y2, y3
+
+    def forward(self, x):
+        """Apply multi-dilation filtering, spatial channel exchange, and projection."""
+        x = self.project_in(x)
+        x1 = F.relu(self.dwconv_d1(x), inplace=True)
+        x2 = F.relu(self.dwconv_d2(x), inplace=True)
+        x3 = F.relu(self.dwconv_d3(x), inplace=True)
+        y1, y2, y3 = self._split_exchange(x1, x2, x3)
+        y1 = F.relu(self.dwconv_d1_out(y1), inplace=True)
+        y2 = F.relu(self.dwconv_d2_out(y2), inplace=True)
+        y3 = F.relu(self.dwconv_d3_out(y3), inplace=True)
+        return self.project_out(torch.cat([y1, y2, y3], dim=1))
+
+
+class _FreDFTFrequencyAttention(nn.Module):
+    """Cross-modal frequency-domain QK attention adapted from FreDFT FDCA."""
+
+    def __init__(self, channels: int):
+        """Initialize FFT-based cross-modal attention projections."""
+        super().__init__()
+        self.norm = _FreDFTLayerNorm2d(channels)
+        self.to_hidden = nn.Conv2d(channels, channels * 6, 1, bias=False)
+        self.to_hidden_dw = nn.Conv2d(channels * 6, channels * 6, 3, padding=1, groups=channels * 6, bias=False)
+        self.freq_norm = _FreDFTLayerNorm2d(channels * 2)
+        self.project_out = nn.Conv2d(channels * 2, channels, 1, bias=False)
+
+    @staticmethod
+    def _frequency_gate(q, k):
+        """Use elementwise FFT-domain multiplication as a global frequency response."""
+        response = torch.fft.rfft2(q.float()) * torch.fft.rfft2(k.float())
+        return torch.fft.irfft2(response, s=q.shape[-2:]).to(dtype=q.dtype)
+
+    def forward(self, x_rgb, x_ir):
+        """Return same-stream deltas modulated by cross-modal frequency responses."""
+        rgb_q, rgb_k, rgb_v = self.to_hidden_dw(self.to_hidden(self.norm(x_rgb))).chunk(3, dim=1)
+        ir_q, ir_k, ir_v = self.to_hidden_dw(self.to_hidden(self.norm(x_ir))).chunk(3, dim=1)
+        rgb_to_ir = self.freq_norm(self._frequency_gate(rgb_q, ir_k))
+        ir_to_rgb = self.freq_norm(self._frequency_gate(ir_q, rgb_k))
+        rgb_delta = self.project_out(rgb_v * ir_to_rgb)
+        ir_delta = self.project_out(ir_v * rgb_to_ir)
+        return rgb_delta, ir_delta
+
+
+class FreDFTFusion(nn.Module):
+    """FreDFT-style frequency-domain RGB-IR fusion for one YOLO feature stage.
+
+    This module keeps the existing dual-stream fusion contract, accepting RGB and IR
+    tensors with identical BCHW shape and returning a fused tensor with the same
+    shape. It adapts FreDFT's FDFTM core: frequency-domain attention first exchanges
+    modality cues, then a spatial dilated feed-forward layer refines each
+    modality before a FDFTM-style concat projection.
+    """
+
+    def __init__(self, channels: int, expansion: float = 3.0):
+        """Initialize a stage-local FreDFT fusion block."""
+        super().__init__()
+        if channels <= 0:
+            raise ValueError("channels must be positive.")
+        if expansion <= 0:
+            raise ValueError("expansion must be positive.")
+        self.freq_attn = _FreDFTFrequencyAttention(channels)
+        self.norm_rgb = _FreDFTLayerNorm2d(channels)
+        self.norm_ir = _FreDFTLayerNorm2d(channels)
+        self.ffn = _FreDFTFeedForward(channels, expansion=expansion)
+        self.fuse = nn.Conv2d(channels * 2, channels, 1, bias=False)
+        self.relu = nn.ReLU(inplace=True)
+
+    def forward(self, x_rgb, x_ir):
+        """Fuse aligned RGB and IR feature maps through cross-QK and dilated FFN paths."""
+        rgb_delta, ir_delta = self.freq_attn(x_rgb, x_ir)
+        rgb_att = x_rgb + rgb_delta
+        ir_att = x_ir + ir_delta
+        rgb = rgb_att + self.ffn(self.norm_rgb(rgb_att))
+        ir = ir_att + self.ffn(self.norm_ir(ir_att))
+        return self.relu(self.fuse(torch.cat([rgb, ir], dim=1)))
