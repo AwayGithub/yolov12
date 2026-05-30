@@ -144,6 +144,21 @@ def test_elu_linear_attention_uses_stable_fp32_accumulation_for_fp16_inputs():
     assert torch.isfinite(y).all()
 
 
+def test_linear_ablock_uses_learnable_residual_scale_for_cold_start_stability():
+    """Linear self-attention should enter the backbone through a small learnable residual scale."""
+    from ultralytics.nn.modules.block import LinearABlock
+
+    m = LinearABlock(dim=64, num_heads=2, area=4, scale_init=0.01)
+    x = torch.randn(2, 64, 12, 16, requires_grad=True)
+
+    y = m(x)
+    y.mean().backward()
+
+    assert y.shape == x.shape
+    assert m.gamma.item() == pytest.approx(0.01, abs=1e-6)
+    assert m.gamma.grad is not None
+
+
 def test_cross_linear_area_attention_preserves_query_shape_and_uses_other_modality():
     """CrossLinearAAttn should use Q from target and K/V from guide while preserving target shape."""
     from ultralytics.nn.modules.block import CrossLinearAAttn
@@ -181,6 +196,8 @@ def test_dual_linear_cross_a2c2f_runs_self_then_cross_blocks():
     assert all(isinstance(pair["self_ir"], LinearABlock) for pair in m.m)
     assert all(isinstance(pair["cross_rgb"], CrossLinearABlock) for pair in m.m)
     assert all(isinstance(pair["cross_ir"], CrossLinearABlock) for pair in m.m)
+    assert all(pair["self_rgb"].gamma.item() == pytest.approx(0.01, abs=1e-6) for pair in m.m)
+    assert all(pair["self_ir"].gamma.item() == pytest.approx(0.01, abs=1e-6) for pair in m.m)
     assert all(pair["cross_rgb"].gamma.item() == pytest.approx(0.01, abs=1e-6) for pair in m.m)
     assert all(pair["cross_ir"].gamma.item() == pytest.approx(0.01, abs=1e-6) for pair in m.m)
     assert x_rgb.grad is not None
