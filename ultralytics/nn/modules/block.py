@@ -6,6 +6,7 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 
 from ultralytics.utils.torch_utils import fuse_conv_and_bn
 
@@ -1678,13 +1679,20 @@ class FreDFTFusion(nn.Module):
     modality before a FDFTM-style concat projection.
     """
 
-    def __init__(self, channels: int, expansion: float = 3.0, qkv_expand: float = 2.0):
+    def __init__(
+        self,
+        channels: int,
+        expansion: float = 3.0,
+        qkv_expand: float = 2.0,
+        checkpoint_ffn: bool = False,
+    ):
         """Initialize a stage-local FreDFT fusion block."""
         super().__init__()
         if channels <= 0:
             raise ValueError("channels must be positive.")
         if expansion <= 0:
             raise ValueError("expansion must be positive.")
+        self.checkpoint_ffn = bool(checkpoint_ffn)
         self.freq_attn = _FreDFTFrequencyAttention(channels, qkv_expand=qkv_expand)
         self.norm_rgb = _FreDFTLayerNorm2d(channels)
         self.norm_ir = _FreDFTLayerNorm2d(channels)
@@ -1692,11 +1700,17 @@ class FreDFTFusion(nn.Module):
         self.fuse = nn.Conv2d(channels * 2, channels, 1, bias=False)
         self.relu = nn.ReLU(inplace=True)
 
+    def _ffn_forward(self, x):
+        """Run FFN with optional activation checkpointing during training."""
+        if self.checkpoint_ffn and self.training and torch.is_grad_enabled() and x.requires_grad:
+            return checkpoint(self.ffn, x, use_reentrant=False)
+        return self.ffn(x)
+
     def forward(self, x_rgb, x_ir):
         """Fuse aligned RGB and IR feature maps through cross-QK and dilated FFN paths."""
         rgb_delta, ir_delta = self.freq_attn(x_rgb, x_ir)
         rgb_att = x_rgb + rgb_delta
         ir_att = x_ir + ir_delta
-        rgb = rgb_att + self.ffn(self.norm_rgb(rgb_att))
-        ir = ir_att + self.ffn(self.norm_ir(ir_att))
+        rgb = rgb_att + self._ffn_forward(self.norm_rgb(rgb_att))
+        ir = ir_att + self._ffn_forward(self.norm_ir(ir_att))
         return self.relu(self.fuse(torch.cat([rgb, ir], dim=1)))

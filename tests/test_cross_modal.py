@@ -73,6 +73,24 @@ def test_fredft_fusion_uses_cross_qk_dilated_ffn_structure():
     assert not hasattr(m, "freq_scale")
 
 
+def test_fredft_fusion_checkpoint_ffn_keeps_training_backward():
+    """FreDFT FFN checkpointing should be configurable and preserve gradients."""
+    from ultralytics.nn.modules.block import FreDFTFusion
+
+    m = FreDFTFusion(channels=8, expansion=1.0, qkv_expand=1.0, checkpoint_ffn=True)
+    m.train()
+    x_rgb = torch.randn(1, 8, 8, 8, requires_grad=True)
+    x_ir = torch.randn(1, 8, 8, 8, requires_grad=True)
+
+    y = m(x_rgb, x_ir)
+    y.mean().backward()
+
+    assert m.checkpoint_ffn is True
+    assert x_rgb.grad is not None
+    assert x_ir.grad is not None
+    assert m.ffn.project_out.weight.grad is not None
+
+
 def test_m2d_lifusion_uses_rgb_illumination_map_and_backprops():
     """M2D-LIF-style fusion uses an RGB-derived illumination map and preserves feature shape."""
     from ultralytics.nn.modules.block import M2DLocalIlluminationFusion, M2DLocalIlluminationGate
@@ -177,8 +195,8 @@ def test_dual_stream_fredft_p3_cfg_extends_confirmed_dmg_init8d_baseline():
     assert model.yaml["dmg_alpha_init"] == pytest.approx(1.0)
     assert model.yaml["dmg_beta_init"] == pytest.approx(-0.1)
     assert model.yaml["freq_fusion_stages"] == ["p3"]
-    assert model.yaml["fredft_expansion"] == pytest.approx(1.0)
-    assert model.yaml["fredft_qkv_expand"] == pytest.approx(1.0)
+    assert model.yaml["fredft_expansion"] == pytest.approx(3.0)
+    assert model.yaml.get("fredft_qkv_expand", 2.0) == pytest.approx(2.0)
     assert isinstance(model.fusion_convs["p2"], DMGFusionInit8d)
     assert model.fusion_convs["p2"].alpha.item() == pytest.approx(1.0)
     assert model.fusion_convs["p2"].beta.item() == pytest.approx(-0.1)
@@ -211,7 +229,8 @@ def test_fredft_stage_sweep_cfgs_extend_dmg_init8d_p3aux_baseline(cfg, expected_
     assert model.yaml["dmg_alpha_init"] == pytest.approx(1.0)
     assert model.yaml["dmg_beta_init"] == pytest.approx(-0.1)
     assert model.yaml["freq_fusion_stages"] == expected_stages
-    assert model.yaml["fredft_expansion"] == pytest.approx(1.0)
+    expected_expansion = 3.0 if cfg == "yolov12-dual-p2-dmg-init8d-p3aux-fredft-p3.yaml" else 1.0
+    assert model.yaml["fredft_expansion"] == pytest.approx(expected_expansion)
     assert model.yaml["fredft_qkv_expand"] == pytest.approx(1.0)
     assert model.yaml["backbone"][6][2] == "A2C2f"
     assert isinstance(model.fusion_convs["p2"], DMGFusionInit8d)
@@ -223,9 +242,11 @@ def test_fredft_stage_sweep_cfgs_extend_dmg_init8d_p3aux_baseline(cfg, expected_
         if stage_name in expected_stages:
             fusion = model.fusion_convs[stage_name]
             channels = fusion.freq_attn.to_hidden.in_channels
-            expected_ffn_hidden = channels + (-channels) % 3
+            expected_ffn_hidden = int(channels * expected_expansion)
+            expected_ffn_hidden += (-expected_ffn_hidden) % 3
             assert fusion.freq_attn.to_hidden.out_channels == channels * 3
             assert fusion.ffn.project_in.out_channels == expected_ffn_hidden
+            assert fusion.checkpoint_ffn is bool(model.yaml.get("fredft_checkpoint_ffn", False))
     assert model.use_aux_head is True
     assert "cmg_stages" not in model.yaml
     assert "cma_stages" not in model.yaml
