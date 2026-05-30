@@ -1387,7 +1387,7 @@ class A2C2f(nn.Module):
         return self.cv2(torch.cat(y, 1))
 
 
-def _elu_linear_attention(q, k, v, eps=1e-6):
+def _elu_linear_attention(q, k, v, eps=1e-6, output_clip=64.0):
     """Apply ELU+1 kernel linear attention to pre-shaped multi-head tokens."""
     out_dtype = q.dtype
     acc_dtype = torch.float32 if q.dtype in (torch.float16, torch.bfloat16) else q.dtype
@@ -1396,7 +1396,11 @@ def _elu_linear_attention(q, k, v, eps=1e-6):
     v = v.to(acc_dtype)
     kv = k.transpose(-2, -1) @ v
     denom = q @ k.sum(dim=-2, keepdim=True).transpose(-2, -1)
-    return ((q @ kv) / denom.clamp_min(eps)).to(out_dtype)
+    out = (q @ kv) / denom.clamp_min(eps)
+    if output_clip is not None:
+        out = torch.nan_to_num(out, nan=0.0, posinf=output_clip, neginf=-output_clip)
+        out = out.clamp(min=-output_clip, max=output_clip)
+    return out.to(out_dtype)
 
 
 class LinearAAttn(nn.Module):
@@ -1498,10 +1502,11 @@ class CrossLinearAAttn(nn.Module):
 class LinearABlock(nn.Module):
     """ABlock variant that uses linear area self-attention."""
 
-    def __init__(self, dim, num_heads, mlp_ratio=1.2, area=1):
+    def __init__(self, dim, num_heads, mlp_ratio=1.2, area=1, scale_init=0.01):
         """Initialize a linear self-attention block followed by the standard pointwise MLP."""
         super().__init__()
         self.attn = LinearAAttn(dim, num_heads=num_heads, area=area)
+        self.gamma = nn.Parameter(torch.tensor(float(scale_init)))
         mlp_hidden_dim = int(dim * mlp_ratio)
         self.mlp = nn.Sequential(Conv(dim, mlp_hidden_dim, 1), Conv(mlp_hidden_dim, dim, 1, act=False))
         self.apply(self._init_weights)
@@ -1515,7 +1520,7 @@ class LinearABlock(nn.Module):
 
     def forward(self, x):
         """Run linear area self-attention and MLP residuals."""
-        x = x + self.attn(x)
+        x = x + self.gamma * self.attn(x)
         x = x + self.mlp(x)
         return x
 
@@ -1580,8 +1585,8 @@ class DualLinearCrossA2C2f(nn.Module):
         self.m = nn.ModuleList(
             nn.ModuleDict(
                 {
-                    "self_rgb": LinearABlock(c_, num_heads, mlp_ratio, area),
-                    "self_ir": LinearABlock(c_, num_heads, mlp_ratio, area),
+                    "self_rgb": LinearABlock(c_, num_heads, mlp_ratio, area, scale_init=scale_init),
+                    "self_ir": LinearABlock(c_, num_heads, mlp_ratio, area, scale_init=scale_init),
                     "cross_rgb": CrossLinearABlock(c_, num_heads, mlp_ratio, area, scale_init=scale_init),
                     "cross_ir": CrossLinearABlock(c_, num_heads, mlp_ratio, area, scale_init=scale_init),
                 }
