@@ -112,58 +112,11 @@ def test_m2d_lifusion_uses_rgb_illumination_map_and_backprops():
     assert x_ir.grad is not None
 
 
-def test_linear_area_attention_preserves_area_shape_and_gradients():
-    """LinearAAttn keeps AAttn's BCHW contract and supports area partitioning."""
-    from ultralytics.nn.modules.block import LinearAAttn
+def test_cross_aattn_preserves_query_shape_and_uses_guide_kv():
+    """CrossAAttn should use target Q with guide K/V while preserving the target BCHW contract."""
+    from ultralytics.nn.modules.block import CrossAAttn
 
-    m = LinearAAttn(dim=64, num_heads=2, area=4)
-    x = torch.randn(2, 64, 12, 16, requires_grad=True)
-
-    y = m(x)
-    y.mean().backward()
-
-    assert y.shape == x.shape
-    assert x.grad is not None
-    assert m.qk.conv.weight.grad is not None
-    assert m.v.conv.weight.grad is not None
-    assert m.proj.conv.weight.grad is not None
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA fp16 is required to reproduce AMP overflow")
-def test_elu_linear_attention_uses_stable_fp32_accumulation_for_fp16_inputs():
-    """ELU+1 linear attention should not overflow its KV accumulation under AMP-like fp16 inputs."""
-    from ultralytics.nn.modules.block import _elu_linear_attention
-
-    q = torch.full((1, 1, 1200, 32), 20.0, device="cuda", dtype=torch.float16)
-    k = torch.full((1, 1, 1200, 32), 20.0, device="cuda", dtype=torch.float16)
-    v = torch.full((1, 1, 1200, 32), 20.0, device="cuda", dtype=torch.float16)
-
-    y = _elu_linear_attention(q, k, v)
-
-    assert y.dtype == torch.float16
-    assert torch.isfinite(y).all()
-
-
-def test_linear_ablock_uses_learnable_residual_scale_for_cold_start_stability():
-    """Linear self-attention should enter the backbone through a small learnable residual scale."""
-    from ultralytics.nn.modules.block import LinearABlock
-
-    m = LinearABlock(dim=64, num_heads=2, area=4, scale_init=0.01)
-    x = torch.randn(2, 64, 12, 16, requires_grad=True)
-
-    y = m(x)
-    y.mean().backward()
-
-    assert y.shape == x.shape
-    assert m.gamma.item() == pytest.approx(0.01, abs=1e-6)
-    assert m.gamma.grad is not None
-
-
-def test_cross_linear_area_attention_preserves_query_shape_and_uses_other_modality():
-    """CrossLinearAAttn should use Q from target and K/V from guide while preserving target shape."""
-    from ultralytics.nn.modules.block import CrossLinearAAttn
-
-    m = CrossLinearAAttn(dim=64, num_heads=2, area=4)
+    m = CrossAAttn(dim=64, num_heads=2, area=4)
     x_rgb = torch.randn(2, 64, 12, 16, requires_grad=True)
     x_ir = torch.randn(2, 64, 12, 16, requires_grad=True)
 
@@ -178,51 +131,63 @@ def test_cross_linear_area_attention_preserves_query_shape_and_uses_other_modali
     assert m.proj.conv.weight.grad is not None
 
 
-def test_dual_linear_cross_a2c2f_runs_self_then_cross_blocks():
-    """DualLinearCrossA2C2f replaces each 2xABlock pair with self-attn then cross-attn."""
-    from ultralytics.nn.modules.block import CrossLinearABlock, DualLinearCrossA2C2f, LinearABlock
+def test_dual_parallel_cross_a2c2f_uses_four_half_width_concat_and_gamma_residual():
+    """Parallel cross A2C2f should split into self/cross halves, concat four paths, and gate the residual."""
+    from ultralytics.nn.modules.block import CrossABlock, DualParallelCrossA2C2f
 
-    m = DualLinearCrossA2C2f(c1=64, c2=64, n=2, area=4, scale_init=0.01)
-    x_rgb = torch.randn(2, 64, 12, 16, requires_grad=True)
-    x_ir = torch.randn(2, 64, 12, 16, requires_grad=True)
+    m = DualParallelCrossA2C2f(c1=128, c2=128, n=2, area=4, scale_init=0.01)
+    x_rgb = torch.randn(2, 128, 12, 16, requires_grad=True)
+    x_ir = torch.randn(2, 128, 12, 16, requires_grad=True)
 
     y_rgb, y_ir = m(x_rgb, x_ir)
     (y_rgb.mean() + y_ir.mean()).backward()
 
     assert y_rgb.shape == x_rgb.shape
     assert y_ir.shape == x_ir.shape
-    assert len(m.m) == 2
-    assert all(isinstance(pair["self_rgb"], LinearABlock) for pair in m.m)
-    assert all(isinstance(pair["self_ir"], LinearABlock) for pair in m.m)
-    assert all(isinstance(pair["cross_rgb"], CrossLinearABlock) for pair in m.m)
-    assert all(isinstance(pair["cross_ir"], CrossLinearABlock) for pair in m.m)
-    assert all(pair["self_rgb"].gamma.item() == pytest.approx(0.01, abs=1e-6) for pair in m.m)
-    assert all(pair["self_ir"].gamma.item() == pytest.approx(0.01, abs=1e-6) for pair in m.m)
-    assert all(pair["cross_rgb"].gamma.item() == pytest.approx(0.01, abs=1e-6) for pair in m.m)
-    assert all(pair["cross_ir"].gamma.item() == pytest.approx(0.01, abs=1e-6) for pair in m.m)
-    assert x_rgb.grad is not None
-    assert x_ir.grad is not None
+    assert m.c_branch == 64
+    assert m.cv1_rgb.conv.out_channels == 128
+    assert m.cv2_rgb.conv.in_channels == 256
+    assert len(m.self_rgb) == 2
+    assert len(m.cross_rgb) == 2
+    assert all(isinstance(block, CrossABlock) for block in m.cross_rgb)
+    assert m.gamma_rgb.item() == pytest.approx(0.01, abs=1e-6)
+    assert m.gamma_ir.item() == pytest.approx(0.01, abs=1e-6)
+    assert m.gamma_rgb.grad is not None
+    assert m.gamma_ir.grad is not None
 
 
-def test_dual_linear_cross_a2c2f_keeps_self_and_cross_channel_widths_aligned():
-    """The second cross-attention block must keep the first self-attention block's QKV and MLP widths."""
-    from ultralytics.nn.modules.block import DualLinearCrossA2C2f
+def test_dual_parallel_cross_a2c2f_keeps_cross_guide_fixed_to_original_split():
+    """The second cross block should still attend to the opposite modality's original split feature."""
+    import torch.nn as nn
+    from ultralytics.nn.modules.block import DualParallelCrossA2C2f
 
-    m = DualLinearCrossA2C2f(c1=64, c2=128, n=1, area=4, mlp_ratio=1.5, e=0.5)
-    pair = m.m[0]
-    self_block = pair["self_rgb"]
-    cross_block = pair["cross_rgb"]
+    class IdentityBlock(nn.Module):
 
-    assert self_block.attn.head_dim == cross_block.attn.head_dim
-    assert self_block.attn.num_heads == cross_block.attn.num_heads
-    assert self_block.attn.qk.conv.out_channels == cross_block.attn.kv.conv.out_channels
-    assert self_block.attn.v.conv.out_channels == cross_block.attn.q.conv.out_channels
-    assert self_block.attn.proj.conv.in_channels == cross_block.attn.proj.conv.in_channels
-    assert self_block.attn.proj.conv.out_channels == cross_block.attn.proj.conv.out_channels
-    assert self_block.mlp[0].conv.in_channels == cross_block.mlp[0].conv.in_channels
-    assert self_block.mlp[0].conv.out_channels == cross_block.mlp[0].conv.out_channels
-    assert self_block.mlp[1].conv.in_channels == cross_block.mlp[1].conv.in_channels
-    assert self_block.mlp[1].conv.out_channels == cross_block.mlp[1].conv.out_channels
+        def forward(self, x):
+            return x
+
+    class RecordingCrossBlock(nn.Module):
+
+        def __init__(self):
+            super().__init__()
+            self.guide_ids = []
+
+        def forward(self, x, guide):
+            self.guide_ids.append(id(guide))
+            return x + 1
+
+    m = DualParallelCrossA2C2f(c1=128, c2=128, n=2, area=4, scale_init=0.01)
+    m.self_rgb = nn.ModuleList([IdentityBlock(), IdentityBlock()])
+    m.self_ir = nn.ModuleList([IdentityBlock(), IdentityBlock()])
+    m.cross_rgb = nn.ModuleList([RecordingCrossBlock(), RecordingCrossBlock()])
+    m.cross_ir = nn.ModuleList([RecordingCrossBlock(), RecordingCrossBlock()])
+
+    y_rgb, y_ir = m(torch.randn(1, 128, 12, 16), torch.randn(1, 128, 12, 16))
+
+    assert y_rgb.shape == (1, 128, 12, 16)
+    assert y_ir.shape == (1, 128, 12, 16)
+    assert m.cross_rgb[0].guide_ids[0] == m.cross_rgb[1].guide_ids[0]
+    assert m.cross_ir[0].guide_ids[0] == m.cross_ir[1].guide_ids[0]
 
 
 def test_dmg_posalpha_bounds_alpha():
@@ -391,14 +356,14 @@ def test_dual_stream_m2d_lif_p4_cfg_extends_confirmed_dmg_init8d_baseline():
     assert "cma_stages" not in model.yaml
 
 
-def test_dual_stream_linear_area_cross_p4p5_cfg_extends_a1_baseline():
-    """Linear Area Cross P4/P5 config should preserve P2 DMGInit8d and P3 FreAtt."""
-    from ultralytics.nn.modules.block import DMGFusionInit8d, DualLinearCrossA2C2f, FreDFTFusion
+def test_dual_stream_parallel_cross_p4p5_cfg_extends_a1_baseline():
+    """Parallel Cross A2C2f P4/P5 config should preserve P2 DMGInit8d and P3 FreAtt."""
+    from ultralytics.nn.modules.block import DMGFusionInit8d, DualParallelCrossA2C2f, FreDFTFusion
     from ultralytics.nn.modules.conv import Conv
     from ultralytics.nn.tasks import DualStreamDetectionModel
 
     model = DualStreamDetectionModel(
-        "yolov12-dual-p2-dmg-init8d-p3aux-fredft-p3-lineararea-p4p5.yaml",
+        "yolov12-dual-p2-dmg-init8d-p3aux-fredft-p3-pcross-p4p5.yaml",
         nc=3,
         verbose=False,
     )
@@ -407,29 +372,29 @@ def test_dual_stream_linear_area_cross_p4p5_cfg_extends_a1_baseline():
     assert model.yaml["dmg_alpha_init"] == pytest.approx(1.0)
     assert model.yaml["dmg_beta_init"] == pytest.approx(-0.1)
     assert model.yaml["freq_fusion_stages"] == ["p3"]
-    assert model.yaml["area_linear_cross_stages"] == ["p4", "p5"]
-    assert model.yaml["area_linear_cross_scale_init"] == pytest.approx(0.01)
+    assert model.yaml["parallel_cross_a2c2f_stages"] == ["p4", "p5"]
+    assert model.yaml["parallel_cross_gamma_init"] == pytest.approx(0.01)
     assert isinstance(model.fusion_convs["p2"], DMGFusionInit8d)
     assert isinstance(model.fusion_convs["p3"], FreDFTFusion)
     assert isinstance(model.fusion_convs["p4"], Conv)
     assert isinstance(model.fusion_convs["p5"], Conv)
-    assert isinstance(model.backbone_rgb[6], DualLinearCrossA2C2f)
-    assert isinstance(model.backbone_rgb[8], DualLinearCrossA2C2f)
+    assert isinstance(model.backbone_rgb[6], DualParallelCrossA2C2f)
+    assert isinstance(model.backbone_rgb[8], DualParallelCrossA2C2f)
     assert model.backbone_rgb[6] is model.backbone_ir[6]
     assert model.backbone_rgb[8] is model.backbone_ir[8]
-    assert model.backbone_rgb[6].m[0]["self_rgb"].attn.area == 4
-    assert model.backbone_rgb[8].m[0]["self_rgb"].attn.area == 1
+    assert model.backbone_rgb[6].cross_rgb[0].attn.area == 4
+    assert model.backbone_rgb[8].cross_rgb[0].attn.area == 1
     assert model.use_aux_head is True
     assert "cmg_stages" not in model.yaml
     assert "cma_stages" not in model.yaml
 
 
-def test_dual_stream_linear_area_cross_p4p5_forward_keeps_four_scale_stride():
-    """Linear Area Cross P4/P5 config should forward 6-channel inputs with 4 detection scales."""
+def test_dual_stream_parallel_cross_p4p5_forward_keeps_four_scale_stride():
+    """Parallel Cross A2C2f P4/P5 config should forward 6-channel inputs with 4 detection scales."""
     from ultralytics.nn.tasks import DualStreamDetectionModel
 
     model = DualStreamDetectionModel(
-        "yolov12-dual-p2-dmg-init8d-p3aux-fredft-p3-lineararea-p4p5.yaml",
+        "yolov12-dual-p2-dmg-init8d-p3aux-fredft-p3-pcross-p4p5.yaml",
         nc=3,
         verbose=False,
     )
@@ -474,6 +439,8 @@ def test_dmg_p2_variant_debug_state_logs_alpha_beta():
     assert "dmg/p2_beta" in debug
     assert debug["dmg/p2_alpha"] == pytest.approx(1.0, abs=1e-6)
     assert debug["dmg/p2_beta"] == pytest.approx(1.0, abs=1e-6)
+
+
 @pytest.mark.parametrize(
     ("cfg", "expected_p4_module", "uses_aux_head"),
     (

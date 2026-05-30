@@ -1,6 +1,6 @@
-# YOLOv12 dual-stream Linear Area Cross-Attention P4/P5
-# Base: P3 aux + P2 DMGFusion Init8d (alpha=1.0, beta=-0.1) + FreAtt at P3.
-# Innovation delta: replace each P4/P5 A2C2f 2xABlock pair with linear self-attn then linear cross-attn.
+# YOLOv12 dual-stream P4/P5 Parallel Cross A2C2f
+# Base: P3 aux + P2 DMGFusion Init8d (alpha=1.0, beta=-0.1) + FreDFT at P3.
+# Innovation delta: replace backbone P4/P5 A2C2f with parallel self/cross A2C2f using original softmax attention.
 
 nc: 3
 ch: 6
@@ -14,8 +14,8 @@ freq_fusion_stages: [p3]
 fredft_expansion: 3.0
 fredft_qkv_expand: 1.0
 fredft_checkpoint_ffn: true
-area_linear_cross_stages: [p4, p5]
-area_linear_cross_scale_init: 0.01
+parallel_cross_a2c2f_stages: [p4, p5]
+parallel_cross_gamma_init: 0.01
 
 scales:
   n: [0.50, 0.25, 1024]
