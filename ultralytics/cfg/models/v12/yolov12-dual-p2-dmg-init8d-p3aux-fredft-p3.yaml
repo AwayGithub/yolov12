@@ -11,8 +11,9 @@ dmg_diff_hidden_ratio: 0.25
 dmg_alpha_init: 1.0
 dmg_beta_init: -0.1
 freq_fusion_stages: [p3]
-fredft_expansion: 1.0
+fredft_expansion: 3.0
 fredft_qkv_expand: 1.0
+fredft_checkpoint_ffn: true
 
 scales:
   n: [0.50, 0.25, 1024]

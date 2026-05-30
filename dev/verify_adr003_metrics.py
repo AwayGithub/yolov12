@@ -22,6 +22,8 @@ F_COMPARISONS = {
     "F4 - F0": ("F4", "F0"),
 }
 D_EXPERIMENTS = ("D1", "D2.1", "D2.2", "D2.3", "D3")
+A_EXPERIMENTS = ("A1", "A2")
+KEY_NODE_EXPERIMENTS = ("F0", "F2", "D2.1", *A_EXPERIMENTS)
 
 
 @dataclass(frozen=True)
@@ -73,7 +75,7 @@ def _heading_before(lines: list[str], line_number: int) -> str:
 
 
 def _experiment_from_heading(heading: str) -> str | None:
-    match = re.search(r"\b(F[0-4]|D2\.[123]|D1|D3)\b\s+验证结果", heading)
+    match = re.search(r"\b(F[0-4]|D2\.[123]|D1|D3|A[12])\b\s+验证结果", heading)
     return match.group(1) if match else None
 
 
@@ -170,11 +172,11 @@ def verify_d_delta_table(markdown: str, metrics: dict[str, dict[str, dict[str, D
 def verify_d_summary_table(markdown: str, metrics: dict[str, dict[str, dict[str, Decimal]]]) -> list[str]:
     errors: list[str] = []
     rows = _table_after_heading(markdown, r"D 系列完整分析")
-    expected_experiments = ("F2", *D_EXPERIMENTS)
+    expected_experiments = ("F0", "F2", *D_EXPERIMENTS)
     seen: set[str] = set()
 
     for row in rows[2:]:
-        if len(row.cells) < 5:
+        if len(row.cells) < 7:
             continue
         experiment = row.cells[0]
         if experiment not in expected_experiments:
@@ -182,10 +184,13 @@ def verify_d_summary_table(markdown: str, metrics: dict[str, dict[str, dict[str,
 
         expected_values = (
             metrics[experiment]["all"]["mAP50-95"],
+            metrics[experiment]["all"]["mAP50-95"] - metrics["F2"]["all"]["mAP50-95"],
+            metrics[experiment]["all"]["mAP50-95"] - metrics["F0"]["all"]["mAP50-95"],
             metrics[experiment]["fire"]["mAP50-95"],
             metrics[experiment]["person"]["mAP50-95"],
         )
-        for metric_label, expected, actual_text in zip(("all", "fire", "person"), expected_values, row.cells[2:5]):
+        metric_labels = ("all", "delta vs F2", "delta vs F0", "fire", "person")
+        for metric_label, expected, actual_text in zip(metric_labels, expected_values, row.cells[2:7]):
             _check_equal(errors, f"{experiment} summary {metric_label} mAP50-95", expected, actual_text, row.line_number)
         seen.add(experiment)
 
@@ -194,10 +199,49 @@ def verify_d_summary_table(markdown: str, metrics: dict[str, dict[str, dict[str,
     return errors
 
 
+def verify_a_key_node_table(markdown: str, metrics: dict[str, dict[str, dict[str, Decimal]]]) -> list[str]:
+    errors: list[str] = []
+    rows = _table_after_heading(markdown, r"关键节点 F0/F2/D2\.1")
+    seen: set[str] = set()
+
+    for row in rows[2:]:
+        if len(row.cells) < 9:
+            continue
+        experiment = row.cells[0]
+        if experiment not in KEY_NODE_EXPERIMENTS:
+            continue
+
+        expected_values = (
+            metrics[experiment]["all"]["mAP50-95"],
+            metrics[experiment]["all"]["mAP50-95"] - metrics["F0"]["all"]["mAP50-95"],
+            metrics[experiment]["all"]["mAP50-95"] - metrics["F2"]["all"]["mAP50-95"],
+            metrics[experiment]["all"]["mAP50-95"] - metrics["D2.1"]["all"]["mAP50-95"],
+            metrics[experiment]["smoke"]["mAP50-95"],
+            metrics[experiment]["fire"]["mAP50-95"],
+            metrics[experiment]["person"]["mAP50-95"],
+        )
+        metric_labels = (
+            "all",
+            "delta vs F0",
+            "delta vs F2",
+            "delta vs D2.1",
+            "smoke",
+            "fire",
+            "person",
+        )
+        for metric_label, expected, actual_text in zip(metric_labels, expected_values, row.cells[2:9]):
+            _check_equal(errors, f"{experiment} A-series key-node {metric_label} mAP50-95", expected, actual_text, row.line_number)
+        seen.add(experiment)
+
+    missing = set(KEY_NODE_EXPERIMENTS) - seen
+    errors.extend(f"missing A-series key-node row: {experiment}" for experiment in sorted(missing))
+    return errors
+
+
 def verify_adr003_metrics(path: Path) -> list[str]:
     markdown = path.read_text(encoding="utf-8")
     metrics = parse_source_metrics(markdown)
-    required = {"F0", "F1", "F2", "F3", "F4", "D1", "D2.1", "D2.2", "D2.3", "D3"}
+    required = {"F0", "F1", "F2", "F3", "F4", "D1", "D2.1", "D2.2", "D2.3", "D3", *A_EXPERIMENTS}
     errors = [f"missing source metric table: {experiment}" for experiment in sorted(required - set(metrics))]
 
     for experiment, class_metrics in metrics.items():
@@ -210,6 +254,7 @@ def verify_adr003_metrics(path: Path) -> list[str]:
     errors.extend(verify_f_comparison_table(markdown, metrics))
     errors.extend(verify_d_delta_table(markdown, metrics))
     errors.extend(verify_d_summary_table(markdown, metrics))
+    errors.extend(verify_a_key_node_table(markdown, metrics))
     return errors
 
 
