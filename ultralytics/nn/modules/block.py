@@ -59,6 +59,11 @@ __all__ = (
     "M2DLocalIlluminationGate",
     "M2DLocalIlluminationFusion",
     "FreDFTFusion",
+    "LinearAAttn",
+    "LinearABlock",
+    "CrossLinearAAttn",
+    "CrossLinearABlock",
+    "DualLinearCrossA2C2f",
 )
 
 logger = logging.getLogger(__name__)
@@ -1380,6 +1385,221 @@ class A2C2f(nn.Module):
         if self.gamma is not None:
             return x + self.gamma.view(1, -1, 1, 1) * self.cv2(torch.cat(y, 1))
         return self.cv2(torch.cat(y, 1))
+
+
+def _elu_linear_attention(q, k, v, eps=1e-6):
+    """Apply ELU+1 kernel linear attention to pre-shaped multi-head tokens."""
+    q = F.elu(q) + 1.0
+    k = F.elu(k) + 1.0
+    kv = k.transpose(-2, -1) @ v
+    denom = q @ k.sum(dim=-2, keepdim=True).transpose(-2, -1)
+    return (q @ kv) / (denom + eps)
+
+
+class LinearAAttn(nn.Module):
+    """Area attention variant using ELU+1 linear attention instead of softmax attention."""
+
+    def __init__(self, dim, num_heads, area=1):
+        """Initialize linear area self-attention with the same projection layout as AAttn."""
+        super().__init__()
+        self.area = area
+        self.num_heads = num_heads
+        self.head_dim = head_dim = dim // num_heads
+        all_head_dim = head_dim * self.num_heads
+
+        self.qk = Conv(dim, all_head_dim * 2, 1, act=False)
+        self.v = Conv(dim, all_head_dim, 1, act=False)
+        self.proj = Conv(all_head_dim, dim, 1, act=False)
+        self.pe = Conv(all_head_dim, dim, 5, 1, 2, g=dim, act=False)
+
+    def forward(self, x):
+        """Process BCHW feature maps through area-partitioned linear self-attention."""
+        B, C, H, W = x.shape
+        N = H * W
+        if self.area > 1 and N % self.area != 0:
+            raise ValueError(f"Area partition requires H*W divisible by area, got N={N}, area={self.area}.")
+
+        qk = self.qk(x).flatten(2).transpose(1, 2)
+        v_map = self.v(x)
+        pp = self.pe(v_map)
+        v = v_map.flatten(2).transpose(1, 2)
+
+        if self.area > 1:
+            qk = qk.reshape(B * self.area, N // self.area, C * 2)
+            v = v.reshape(B * self.area, N // self.area, C)
+        q, k = qk.split([C, C], dim=2)
+        b_area, n_area, _ = q.shape
+
+        q = q.reshape(b_area, n_area, self.num_heads, self.head_dim).transpose(1, 2)
+        k = k.reshape(b_area, n_area, self.num_heads, self.head_dim).transpose(1, 2)
+        v = v.reshape(b_area, n_area, self.num_heads, self.head_dim).transpose(1, 2)
+
+        x = _elu_linear_attention(q, k, v)
+        x = x.transpose(1, 2).reshape(b_area, n_area, C)
+        if self.area > 1:
+            x = x.reshape(B, N, C)
+        x = x.reshape(B, H, W, C).permute(0, 3, 1, 2)
+        return self.proj(x + pp)
+
+
+class CrossLinearAAttn(nn.Module):
+    """Linear area cross-attention with Q from target and K/V from guide modality."""
+
+    def __init__(self, dim, num_heads, area=1):
+        """Initialize cross-modal linear area attention with separate Q and KV projections."""
+        super().__init__()
+        self.area = area
+        self.num_heads = num_heads
+        self.head_dim = head_dim = dim // num_heads
+        all_head_dim = head_dim * self.num_heads
+
+        self.q = Conv(dim, all_head_dim, 1, act=False)
+        self.kv = Conv(dim, all_head_dim * 2, 1, act=False)
+        self.proj = Conv(all_head_dim, dim, 1, act=False)
+        self.pe = Conv(all_head_dim, dim, 5, 1, 2, g=dim, act=False)
+
+    def forward(self, x, guide):
+        """Return target-shaped features after attending to guide modality features."""
+        B, C, H, W = x.shape
+        if guide.shape != x.shape:
+            raise ValueError(f"CrossLinearAAttn expects matched BCHW tensors, got {x.shape} and {guide.shape}.")
+        N = H * W
+        if self.area > 1 and N % self.area != 0:
+            raise ValueError(f"Area partition requires H*W divisible by area, got N={N}, area={self.area}.")
+
+        q = self.q(x).flatten(2).transpose(1, 2)
+        kv_map = self.kv(guide)
+        k_map, v_map = kv_map.chunk(2, dim=1)
+        pp = self.pe(v_map)
+        k = k_map.flatten(2).transpose(1, 2)
+        v = v_map.flatten(2).transpose(1, 2)
+
+        if self.area > 1:
+            q = q.reshape(B * self.area, N // self.area, C)
+            k = k.reshape(B * self.area, N // self.area, C)
+            v = v.reshape(B * self.area, N // self.area, C)
+        b_area, n_area, _ = q.shape
+
+        q = q.reshape(b_area, n_area, self.num_heads, self.head_dim).transpose(1, 2)
+        k = k.reshape(b_area, n_area, self.num_heads, self.head_dim).transpose(1, 2)
+        v = v.reshape(b_area, n_area, self.num_heads, self.head_dim).transpose(1, 2)
+
+        x = _elu_linear_attention(q, k, v)
+        x = x.transpose(1, 2).reshape(b_area, n_area, C)
+        if self.area > 1:
+            x = x.reshape(B, N, C)
+        x = x.reshape(B, H, W, C).permute(0, 3, 1, 2)
+        return self.proj(x + pp)
+
+
+class LinearABlock(nn.Module):
+    """ABlock variant that uses linear area self-attention."""
+
+    def __init__(self, dim, num_heads, mlp_ratio=1.2, area=1):
+        """Initialize a linear self-attention block followed by the standard pointwise MLP."""
+        super().__init__()
+        self.attn = LinearAAttn(dim, num_heads=num_heads, area=area)
+        mlp_hidden_dim = int(dim * mlp_ratio)
+        self.mlp = nn.Sequential(Conv(dim, mlp_hidden_dim, 1), Conv(mlp_hidden_dim, dim, 1, act=False))
+        self.apply(self._init_weights)
+
+    def _init_weights(self, m):
+        """Initialize convolution weights like the original ABlock."""
+        if isinstance(m, nn.Conv2d):
+            nn.init.trunc_normal_(m.weight, std=0.02)
+            if m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+
+    def forward(self, x):
+        """Run linear area self-attention and MLP residuals."""
+        x = x + self.attn(x)
+        x = x + self.mlp(x)
+        return x
+
+
+class CrossLinearABlock(nn.Module):
+    """Cross-modal ABlock variant with a learnable residual scale on cross attention."""
+
+    def __init__(self, dim, num_heads, mlp_ratio=1.2, area=1, scale_init=0.01):
+        """Initialize cross-modal linear area attention and MLP residuals."""
+        super().__init__()
+        self.attn = CrossLinearAAttn(dim, num_heads=num_heads, area=area)
+        self.gamma = nn.Parameter(torch.tensor(float(scale_init)))
+        mlp_hidden_dim = int(dim * mlp_ratio)
+        self.mlp = nn.Sequential(Conv(dim, mlp_hidden_dim, 1), Conv(mlp_hidden_dim, dim, 1, act=False))
+        self.apply(self._init_weights)
+
+    def _init_weights(self, m):
+        """Initialize convolution weights like the original ABlock."""
+        if isinstance(m, nn.Conv2d):
+            nn.init.trunc_normal_(m.weight, std=0.02)
+            if m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+
+    def forward(self, x, guide):
+        """Run scaled cross attention against guide modality, then the standard MLP residual."""
+        x = x + self.gamma * self.attn(x, guide)
+        x = x + self.mlp(x)
+        return x
+
+
+class DualLinearCrossA2C2f(nn.Module):
+    """Dual-stream A2C2f variant: each pair runs linear self-attention then linear cross-attention."""
+
+    def __init__(
+        self,
+        c1,
+        c2,
+        n=1,
+        a2=True,
+        area=1,
+        residual=False,
+        mlp_ratio=2.0,
+        e=0.5,
+        g=1,
+        shortcut=True,
+        scale_init=0.01,
+    ):
+        """Initialize a P4/P5 dual-stream A2C2f replacement with separate RGB/IR branch weights."""
+        super().__init__()
+        if not a2:
+            raise ValueError("DualLinearCrossA2C2f requires a2=True to replace Area Attention blocks.")
+        c_ = int(c2 * e)
+        assert c_ % 32 == 0, "Dimension of LinearABlock must be a multiple of 32."
+        num_heads = c_ // 32
+
+        self.cv1_rgb = Conv(c1, c_, 1, 1)
+        self.cv1_ir = Conv(c1, c_, 1, 1)
+        self.cv2_rgb = Conv((1 + n) * c_, c2, 1)
+        self.cv2_ir = Conv((1 + n) * c_, c2, 1)
+        self.gamma = None
+
+        self.m = nn.ModuleList(
+            nn.ModuleDict(
+                {
+                    "self_rgb": LinearABlock(c_, num_heads, mlp_ratio, area),
+                    "self_ir": LinearABlock(c_, num_heads, mlp_ratio, area),
+                    "cross_rgb": CrossLinearABlock(c_, num_heads, mlp_ratio, area, scale_init=scale_init),
+                    "cross_ir": CrossLinearABlock(c_, num_heads, mlp_ratio, area, scale_init=scale_init),
+                }
+            )
+            for _ in range(n)
+        )
+
+    def forward(self, x_rgb, x_ir):
+        """Synchronously enhance RGB and IR features with self-then-cross linear area attention pairs."""
+        y_rgb = [self.cv1_rgb(x_rgb)]
+        y_ir = [self.cv1_ir(x_ir)]
+        rgb, ir = y_rgb[-1], y_ir[-1]
+        for pair in self.m:
+            rgb = pair["self_rgb"](rgb)
+            ir = pair["self_ir"](ir)
+            rgb_next = pair["cross_rgb"](rgb, ir)
+            ir_next = pair["cross_ir"](ir, rgb)
+            rgb, ir = rgb_next, ir_next
+            y_rgb.append(rgb)
+            y_ir.append(ir)
+        return self.cv2_rgb(torch.cat(y_rgb, 1)), self.cv2_ir(torch.cat(y_ir, 1))
 
 
 class DMGFusion(nn.Module):
