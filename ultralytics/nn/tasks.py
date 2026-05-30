@@ -68,6 +68,7 @@ from ultralytics.nn.modules import (
     DMGFusion,
     DMGFusionPosAlpha,
     DMGFusionInit8d,
+    DualLinearCrossA2C2f,
     M2DLocalIlluminationFusion,
     M2DLocalIlluminationGate,
     FreDFTFusion,
@@ -564,6 +565,59 @@ class DualStreamDetectionModel(DetectionModel):
         self.lif_fusion_stages = set(_lif_stages)
         self.lif_gate = M2DLocalIlluminationGate() if self.lif_fusion_stages else None
 
+        _area_linear_cross_stages = self.yaml.get("area_linear_cross_stages", [])
+        if isinstance(_area_linear_cross_stages, str):
+            _area_linear_cross_stages = [s.strip() for s in _area_linear_cross_stages.split(",") if s.strip()]
+        _area_linear_cross_stages = list(_area_linear_cross_stages)
+        _valid_area_linear_cross_stages = {"p4", "p5"}
+        _unknown_area_linear_cross_stages = (
+            set(_area_linear_cross_stages) - _valid_area_linear_cross_stages
+        )
+        if _unknown_area_linear_cross_stages:
+            raise ValueError(
+                "area_linear_cross_stages contains unsupported stages: "
+                f"{sorted(_unknown_area_linear_cross_stages)}. Supported values: p4, p5."
+            )
+        _overlapped_stages = set(_area_linear_cross_stages) & (
+            self.freq_fusion_stages | self.lif_fusion_stages
+        )
+        if _overlapped_stages:
+            raise ValueError(
+                "area_linear_cross_stages overlaps with another fusion innovation at "
+                f"{sorted(_overlapped_stages)}. Use one fusion innovation per stage."
+            )
+        self.area_linear_cross_stages = set(_area_linear_cross_stages)
+        self._area_linear_cross_layer_to_stage = {}
+        for stage_name in self.area_linear_cross_stages:
+            layer_idx = self.FUSION_LAYER_INDICES[stage_name]
+            old_layer = self.backbone_rgb[layer_idx]
+            if not isinstance(old_layer, A2C2f):
+                raise ValueError(
+                    f"area_linear_cross_stages requires A2C2f at {stage_name}, "
+                    f"got {type(old_layer).__name__}."
+                )
+            c1 = old_layer.cv1.conv.in_channels
+            c2 = old_layer.cv2.conv.out_channels
+            c_hidden = old_layer.cv1.conv.out_channels
+            n = len(old_layer.m)
+            area = old_layer.m[0][0].attn.area
+            mlp_ratio = old_layer.m[0][0].mlp[0].conv.out_channels / c_hidden
+            new_layer = DualLinearCrossA2C2f(
+                c1,
+                c2,
+                n=n,
+                area=area,
+                mlp_ratio=mlp_ratio,
+                e=c_hidden / c2,
+                scale_init=float(self.yaml.get("area_linear_cross_scale_init", 0.01)),
+            )
+            new_layer.i = old_layer.i
+            new_layer.f = old_layer.f
+            new_layer.type = f"{DualLinearCrossA2C2f.__module__}.{DualLinearCrossA2C2f.__name__}"
+            self.backbone_rgb[layer_idx] = new_layer
+            self.backbone_ir[layer_idx] = new_layer
+            self._area_linear_cross_layer_to_stage[layer_idx] = stage_name
+
         self.fusion_convs = nn.ModuleDict()
         for stage_name, layer_idx in self.FUSION_LAYER_INDICES.items():
             c_out = self._get_layer_out_channels(self.backbone_rgb[layer_idx])
@@ -650,6 +704,8 @@ class DualStreamDetectionModel(DetectionModel):
     @staticmethod
     def _get_layer_out_channels(layer):
         """获取层的输出通道数。"""
+        if hasattr(layer, "cv2_rgb"):  # DualLinearCrossA2C2f
+            return layer.cv2_rgb.conv.out_channels
         if hasattr(layer, "cv2"):  # C3k2, A2C2f, C2f
             return layer.cv2.conv.out_channels
         elif hasattr(layer, "conv"):  # Conv
@@ -666,8 +722,11 @@ class DualStreamDetectionModel(DetectionModel):
                 x_rgb = y_rgb[m_rgb.f] if isinstance(m_rgb.f, int) else [x_rgb if j == -1 else y_rgb[j] for j in m_rgb.f]
             if m_ir.f != -1:
                 x_ir = y_ir[m_ir.f] if isinstance(m_ir.f, int) else [x_ir if j == -1 else y_ir[j] for j in m_ir.f]
-            x_rgb = m_rgb(x_rgb)
-            x_ir = m_ir(x_ir)
+            if layer_idx in self._area_linear_cross_layer_to_stage:
+                x_rgb, x_ir = m_rgb(x_rgb, x_ir)
+            else:
+                x_rgb = m_rgb(x_rgb)
+                x_ir = m_ir(x_ir)
             y_rgb.append(x_rgb if layer_idx in self.save else None)
             y_ir.append(x_ir if layer_idx in self.save else None)
             for stage_name, stage_idx in self.FUSION_LAYER_INDICES.items():
