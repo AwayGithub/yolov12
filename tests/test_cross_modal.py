@@ -129,6 +129,21 @@ def test_linear_area_attention_preserves_area_shape_and_gradients():
     assert m.proj.conv.weight.grad is not None
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA fp16 is required to reproduce AMP overflow")
+def test_elu_linear_attention_uses_stable_fp32_accumulation_for_fp16_inputs():
+    """ELU+1 linear attention should not overflow its KV accumulation under AMP-like fp16 inputs."""
+    from ultralytics.nn.modules.block import _elu_linear_attention
+
+    q = torch.full((1, 1, 1200, 32), 20.0, device="cuda", dtype=torch.float16)
+    k = torch.full((1, 1, 1200, 32), 20.0, device="cuda", dtype=torch.float16)
+    v = torch.full((1, 1, 1200, 32), 20.0, device="cuda", dtype=torch.float16)
+
+    y = _elu_linear_attention(q, k, v)
+
+    assert y.dtype == torch.float16
+    assert torch.isfinite(y).all()
+
+
 def test_cross_linear_area_attention_preserves_query_shape_and_uses_other_modality():
     """CrossLinearAAttn should use Q from target and K/V from guide while preserving target shape."""
     from ultralytics.nn.modules.block import CrossLinearAAttn

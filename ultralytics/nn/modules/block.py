@@ -1389,11 +1389,14 @@ class A2C2f(nn.Module):
 
 def _elu_linear_attention(q, k, v, eps=1e-6):
     """Apply ELU+1 kernel linear attention to pre-shaped multi-head tokens."""
-    q = F.elu(q) + 1.0
-    k = F.elu(k) + 1.0
+    out_dtype = q.dtype
+    acc_dtype = torch.float32 if q.dtype in (torch.float16, torch.bfloat16) else q.dtype
+    q = F.elu(q.to(acc_dtype)) + 1.0
+    k = F.elu(k.to(acc_dtype)) + 1.0
+    v = v.to(acc_dtype)
     kv = k.transpose(-2, -1) @ v
     denom = q @ k.sum(dim=-2, keepdim=True).transpose(-2, -1)
-    return (q @ kv) / (denom + eps)
+    return ((q @ kv) / denom.clamp_min(eps)).to(out_dtype)
 
 
 class LinearAAttn(nn.Module):
