@@ -95,6 +95,8 @@ def resolve_data_path(args, yolo_model):
 
     train_data = _checkpoint_train_args(yolo_model).get("data")
     if train_data:
+        if isinstance(train_data, dict):
+            return train_data
         return _resolve_repo_path(train_data)
 
     if not _expects_dual_input(yolo_model) and _looks_like_ir_checkpoint(args, yolo_model):
@@ -103,8 +105,36 @@ def resolve_data_path(args, yolo_model):
     return _resolve_repo_path(DEFAULT_DUAL_DATA)
 
 
+def _fix_embedded_dataset_path(data_cfg):
+    """Override absolute paths in embedded dataset dict if they don't exist locally."""
+    if not isinstance(data_cfg, dict):
+        return data_cfg
+
+    path = data_cfg.get("path")
+    if not path:
+        return data_cfg
+
+    # If path doesn't exist, try to resolve it relative to current workspace
+    p = Path(path)
+    if not p.exists():
+        # Heuristic: if it's RGBT-3M, use the local one
+        workspace_rgbt = SCRIPT_DIR / "RGBT-3M"
+        if "RGBT-3M" in str(p) and workspace_rgbt.exists():
+            print(f"Overriding dataset path: {path} -> {workspace_rgbt}")
+            data_cfg["path"] = str(workspace_rgbt)
+            
+            # Also ensure train/val/test are just filenames if they were absolute
+            for key in ["train", "val", "test"]:
+                if key in data_cfg and isinstance(data_cfg[key], str):
+                    if "/" in data_cfg[key] or "\\" in data_cfg[key]:
+                        data_cfg[key] = Path(data_cfg[key]).name
+    return data_cfg
+
+
 def load_validation_data_cfg(data_path):
-    """Load a validation dataset YAML from a resolved path."""
+    """Load a validation dataset YAML from a resolved path or return it if it's already a dict."""
+    if isinstance(data_path, dict):
+        return _fix_embedded_dataset_path(data_path)
     data_path = Path(data_path)
     if not data_path.exists():
         raise FileNotFoundError(f"Dataset config does not exist: {data_path}")
@@ -205,7 +235,10 @@ if __name__ == "__main__":
     input_mode = resolve_input_mode(args, model, data_cfg)
     data_cfg["input_mode"] = input_mode
 
-    print(f"Using dataset config: {data_path}")
+    if isinstance(data_path, dict):
+        print("Using dataset config embedded in checkpoint.")
+    else:
+        print(f"Using dataset config: {data_path}")
     print(f"Using input_mode: {input_mode}")
     
     # 3. 注册回调函数以保存所有图片的检测结果图
