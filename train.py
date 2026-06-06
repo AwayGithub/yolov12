@@ -9,6 +9,13 @@ from ultralytics.utils import yaml_load, yaml_save
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument(
+        "--data_root",
+        type=str,
+        default=None,
+        metavar="DIR",
+        help="RGBT-3M 数据根目录，用于覆盖默认数据集路径",
+    )
+    parser.add_argument(
         "--input_mode",
         type=str,
         default="dual_input",
@@ -181,6 +188,20 @@ if __name__ == "__main__":
     args = parse_args()
     data_cfg = yaml_load("ultralytics/cfg/datasets/RGBT-3M.yaml")
     data_cfg["input_mode"] = args.input_mode
+    if args.data_root:
+        data_root = Path(args.data_root).expanduser().resolve()
+        if (data_root / "train.txt").is_file():
+            dataset_root = data_root
+        elif (data_root / "RGBT-3M" / "train.txt").is_file():
+            dataset_root = data_root / "RGBT-3M"
+        else:
+            raise FileNotFoundError(
+                f"Could not find train.txt under {data_root} or {data_root / 'RGBT-3M'}"
+            )
+        data_cfg["path"] = str(dataset_root)
+        data_cfg["train"] = str(dataset_root / "train.txt")
+        data_cfg["val"] = str(dataset_root / "val.txt")
+        print(f"[data-root] Using dataset root: {dataset_root}")
 
     train_script_path = Path(__file__).resolve()
     cfg_for_snapshot = None
