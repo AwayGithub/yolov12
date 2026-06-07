@@ -1481,6 +1481,7 @@ class DualParallelCrossA2C2f(nn.Module):
         area=1,
         residual=False,
         mlp_ratio=2.0,
+        cross_mlp_ratio=None,
         e=0.5,
         g=1,
         shortcut=True,
@@ -1497,13 +1498,14 @@ class DualParallelCrossA2C2f(nn.Module):
         self.c_branch = c2 // 2
         assert self.c_branch % 32 == 0, "Dimension of CrossABlock must be a multiple of 32."
         num_heads = self.c_branch // 32
+        cross_mlp_ratio = mlp_ratio if cross_mlp_ratio is None else cross_mlp_ratio
 
         self.cv1_rgb = Conv(c1, c2, 1, 1)
         self.cv1_ir = Conv(c1, c2, 1, 1)
         self.self_rgb = nn.ModuleList(ABlock(self.c_branch, num_heads, mlp_ratio, area) for _ in range(n))
         self.self_ir = nn.ModuleList(ABlock(self.c_branch, num_heads, mlp_ratio, area) for _ in range(n))
-        self.cross_rgb = nn.ModuleList(CrossABlock(self.c_branch, num_heads, mlp_ratio, area) for _ in range(n))
-        self.cross_ir = nn.ModuleList(CrossABlock(self.c_branch, num_heads, mlp_ratio, area) for _ in range(n))
+        self.cross_rgb = nn.ModuleList(CrossABlock(self.c_branch, num_heads, cross_mlp_ratio, area) for _ in range(n))
+        self.cross_ir = nn.ModuleList(CrossABlock(self.c_branch, num_heads, cross_mlp_ratio, area) for _ in range(n))
         self.cv2_rgb = Conv(c2 * 2, c2, 1)
         self.cv2_ir = Conv(c2 * 2, c2, 1)
         self.gamma_rgb = nn.Parameter(torch.tensor(float(scale_init)))

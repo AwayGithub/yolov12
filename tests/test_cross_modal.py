@@ -135,7 +135,7 @@ def test_dual_parallel_cross_a2c2f_uses_four_half_width_concat_and_gamma_residua
     """Parallel cross A2C2f should split into self/cross halves, concat four paths, and gate the residual."""
     from ultralytics.nn.modules.block import CrossABlock, DualParallelCrossA2C2f
 
-    m = DualParallelCrossA2C2f(c1=128, c2=128, n=2, area=4, scale_init=0.01)
+    m = DualParallelCrossA2C2f(c1=128, c2=128, n=2, area=4, cross_mlp_ratio=1.0, scale_init=0.01)
     x_rgb = torch.randn(2, 128, 12, 16, requires_grad=True)
     x_ir = torch.randn(2, 128, 12, 16, requires_grad=True)
 
@@ -150,6 +150,8 @@ def test_dual_parallel_cross_a2c2f_uses_four_half_width_concat_and_gamma_residua
     assert len(m.self_rgb) == 2
     assert len(m.cross_rgb) == 2
     assert all(isinstance(block, CrossABlock) for block in m.cross_rgb)
+    assert m.self_rgb[0].mlp[0].conv.out_channels == 128
+    assert m.cross_rgb[0].mlp[0].conv.out_channels == 64
     assert m.gamma_rgb.item() == pytest.approx(0.01, abs=1e-6)
     assert m.gamma_ir.item() == pytest.approx(0.01, abs=1e-6)
     assert m.gamma_rgb.grad is not None
@@ -354,6 +356,27 @@ def test_dual_stream_m2d_lif_p4_cfg_extends_confirmed_dmg_init8d_baseline():
     assert "freq_fusion_stages" not in model.yaml
     assert "cmg_stages" not in model.yaml
     assert "cma_stages" not in model.yaml
+
+
+def test_dual_stream_parallel_cross_p4_cfg_uses_light_cross_mlp_only():
+    """P4-only Parallel Cross config should reduce only the cross-modal MLP ratio to 1.0."""
+    from ultralytics.nn.modules.block import A2C2f, DualParallelCrossA2C2f
+    from ultralytics.nn.tasks import DualStreamDetectionModel
+
+    model = DualStreamDetectionModel(
+        "yolov12-dual-p2-dmg-init8d-p3aux-fredft-p3-pcross-p4.yaml",
+        nc=3,
+        verbose=False,
+    )
+
+    p4 = model.backbone_rgb[6]
+    assert model.yaml["parallel_cross_a2c2f_stages"] == ["p4"]
+    assert model.yaml["parallel_cross_mlp_ratio"] == pytest.approx(1.0)
+    assert isinstance(p4, DualParallelCrossA2C2f)
+    assert p4 is model.backbone_ir[6]
+    assert p4.self_rgb[0].mlp[0].conv.out_channels == 128
+    assert p4.cross_rgb[0].mlp[0].conv.out_channels == 64
+    assert isinstance(model.backbone_rgb[8], A2C2f)
 
 
 def test_dual_stream_parallel_cross_p4p5_cfg_extends_a1_baseline():

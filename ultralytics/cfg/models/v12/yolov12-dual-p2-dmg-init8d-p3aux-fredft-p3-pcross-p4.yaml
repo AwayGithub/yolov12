@@ -16,6 +16,7 @@ fredft_qkv_expand: 1.0
 fredft_checkpoint_ffn: true
 parallel_cross_a2c2f_stages: [p4]
 parallel_cross_gamma_init: 0.01
+parallel_cross_mlp_ratio: 1.0
 
 scales:
   n: [0.50, 0.25, 1024]

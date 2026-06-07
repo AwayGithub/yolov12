@@ -604,6 +604,7 @@ class DualStreamDetectionModel(DetectionModel):
                 n=n,
                 area=area,
                 mlp_ratio=mlp_ratio,
+                cross_mlp_ratio=float(self.yaml.get("parallel_cross_mlp_ratio", mlp_ratio)),
                 scale_init=float(self.yaml.get("parallel_cross_gamma_init", 0.01)),
             )
             new_layer.i = old_layer.i
