@@ -154,8 +154,12 @@ def test_dual_parallel_cross_a2c2f_uses_four_half_width_concat_and_gamma_residua
     assert m.cross_rgb[0].mlp[0].conv.out_channels == 64
     assert m.gamma_rgb.item() == pytest.approx(0.01, abs=1e-6)
     assert m.gamma_ir.item() == pytest.approx(0.01, abs=1e-6)
+    assert m.cross_scale_rgb.item() == pytest.approx(1.0)
+    assert m.cross_scale_ir.item() == pytest.approx(1.0)
     assert m.gamma_rgb.grad is not None
     assert m.gamma_ir.grad is not None
+    assert m.cross_scale_rgb.grad is not None
+    assert m.cross_scale_ir.grad is not None
 
 
 def test_dual_parallel_cross_a2c2f_keeps_cross_guide_fixed_to_original_split():
@@ -379,6 +383,26 @@ def test_dual_stream_parallel_cross_p4_cfg_uses_light_cross_mlp_only():
     assert isinstance(model.backbone_rgb[8], A2C2f)
 
 
+def test_dual_stream_parallel_cross_p4_asym_cfg_scales_only_ir_to_rgb_cross_residual():
+    """B4 should preserve B2 MLP width and initialize asymmetric learnable cross residual scales."""
+    from ultralytics.nn.modules.block import A2C2f, DualParallelCrossA2C2f
+    from ultralytics.nn.tasks import DualStreamDetectionModel
+
+    model = DualStreamDetectionModel(
+        "yolov12-dual-p2-dmg-init8d-p3aux-fredft-p3-pcross-p4-asym.yaml",
+        nc=3,
+        verbose=False,
+    )
+
+    p4 = model.backbone_rgb[6]
+    assert isinstance(p4, DualParallelCrossA2C2f)
+    assert p4.self_rgb[0].mlp[0].conv.out_channels == 128
+    assert p4.cross_rgb[0].mlp[0].conv.out_channels == 128
+    assert p4.cross_scale_rgb.item() == pytest.approx(0.5)
+    assert p4.cross_scale_ir.item() == pytest.approx(1.0)
+    assert isinstance(model.backbone_rgb[8], A2C2f)
+
+
 def test_dual_stream_parallel_cross_p4p5_cfg_extends_a1_baseline():
     """Parallel Cross A2C2f P4/P5 config should preserve P2 DMGInit8d and P3 FreAtt."""
     from ultralytics.nn.modules.block import DMGFusionInit8d, DualParallelCrossA2C2f, FreDFTFusion
@@ -462,6 +486,23 @@ def test_dmg_p2_variant_debug_state_logs_alpha_beta():
     assert "dmg/p2_beta" in debug
     assert debug["dmg/p2_alpha"] == pytest.approx(1.0, abs=1e-6)
     assert debug["dmg/p2_beta"] == pytest.approx(1.0, abs=1e-6)
+
+
+def test_parallel_cross_debug_state_logs_gamma_and_cross_scales():
+    """B4 exposes P4 gamma and asymmetric cross scales so results.csv records their trajectories."""
+    from ultralytics.nn.tasks import DualStreamDetectionModel
+
+    model = DualStreamDetectionModel(
+        "yolov12-dual-p2-dmg-init8d-p3aux-fredft-p3-pcross-p4-asym.yaml",
+        nc=3,
+        verbose=False,
+    )
+    debug = model.adapter_debug_state()
+
+    assert debug["pcross/p4_gamma_rgb"] == pytest.approx(0.01)
+    assert debug["pcross/p4_gamma_ir"] == pytest.approx(0.01)
+    assert debug["pcross/p4_cross_scale_rgb"] == pytest.approx(0.5)
+    assert debug["pcross/p4_cross_scale_ir"] == pytest.approx(1.0)
 
 
 @pytest.mark.parametrize(

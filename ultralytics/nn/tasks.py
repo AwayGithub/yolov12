@@ -605,6 +605,8 @@ class DualStreamDetectionModel(DetectionModel):
                 area=area,
                 mlp_ratio=mlp_ratio,
                 cross_mlp_ratio=float(self.yaml.get("parallel_cross_mlp_ratio", mlp_ratio)),
+                cross_scale_rgb_init=float(self.yaml.get("parallel_cross_rgb_scale_init", 1.0)),
+                cross_scale_ir_init=float(self.yaml.get("parallel_cross_ir_scale_init", 1.0)),
                 scale_init=float(self.yaml.get("parallel_cross_gamma_init", 0.01)),
             )
             new_layer.i = old_layer.i
@@ -750,6 +752,8 @@ class DualStreamDetectionModel(DetectionModel):
             layer = self.backbone_rgb[layer_idx]
             debug[f"pcross/{stage_name}_gamma_rgb"] = layer.gamma_rgb.detach().float().item()
             debug[f"pcross/{stage_name}_gamma_ir"] = layer.gamma_ir.detach().float().item()
+            debug[f"pcross/{stage_name}_cross_scale_rgb"] = layer.cross_scale_rgb.detach().float().item()
+            debug[f"pcross/{stage_name}_cross_scale_ir"] = layer.cross_scale_ir.detach().float().item()
         return debug
 
     def _predict_once(self, x, profile=False, visualize=False, embed=None):

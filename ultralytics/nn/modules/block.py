@@ -1482,6 +1482,8 @@ class DualParallelCrossA2C2f(nn.Module):
         residual=False,
         mlp_ratio=2.0,
         cross_mlp_ratio=None,
+        cross_scale_rgb_init=1.0,
+        cross_scale_ir_init=1.0,
         e=0.5,
         g=1,
         shortcut=True,
@@ -1510,6 +1512,8 @@ class DualParallelCrossA2C2f(nn.Module):
         self.cv2_ir = Conv(c2 * 2, c2, 1)
         self.gamma_rgb = nn.Parameter(torch.tensor(float(scale_init)))
         self.gamma_ir = nn.Parameter(torch.tensor(float(scale_init)))
+        self.cross_scale_rgb = nn.Parameter(torch.tensor(float(cross_scale_rgb_init)))
+        self.cross_scale_ir = nn.Parameter(torch.tensor(float(cross_scale_ir_init)))
         self.gamma = None
 
     def forward(self, x_rgb, x_ir):
@@ -1532,6 +1536,8 @@ class DualParallelCrossA2C2f(nn.Module):
             rgb_cross = block(rgb_cross, ir_cross_in)
         for block in self.cross_ir:
             ir_cross = block(ir_cross, rgb_cross_in)
+        rgb_cross = rgb_cross_in + self.cross_scale_rgb * (rgb_cross - rgb_cross_in)
+        ir_cross = ir_cross_in + self.cross_scale_ir * (ir_cross - ir_cross_in)
 
         rgb_delta = self.cv2_rgb(torch.cat((rgb_self_in, rgb_cross_in, rgb_self, rgb_cross), dim=1))
         ir_delta = self.cv2_ir(torch.cat((ir_self_in, ir_cross_in, ir_self, ir_cross), dim=1))
