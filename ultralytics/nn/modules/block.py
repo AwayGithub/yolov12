@@ -1531,12 +1531,12 @@ class DualParallelCrossA2C2f(nn.Module):
             gamma_logit = math.log(scale_init / (gamma_max - scale_init))
             self.gamma_rgb_logit = nn.Parameter(torch.tensor(float(gamma_logit)))
             self.gamma_ir_logit = nn.Parameter(torch.tensor(float(gamma_logit)))
-        self.cross_scale_rgb = nn.Parameter(
-            torch.tensor(float(cross_scale_rgb_init)), requires_grad=bool(learnable_cross_scale)
-        )
-        self.cross_scale_ir = nn.Parameter(
-            torch.tensor(float(cross_scale_ir_init)), requires_grad=bool(learnable_cross_scale)
-        )
+        if learnable_cross_scale:
+            self.cross_scale_rgb = nn.Parameter(torch.tensor(float(cross_scale_rgb_init)))
+            self.cross_scale_ir = nn.Parameter(torch.tensor(float(cross_scale_ir_init)))
+        else:
+            self.register_buffer("cross_scale_rgb", torch.tensor(float(cross_scale_rgb_init)))
+            self.register_buffer("cross_scale_ir", torch.tensor(float(cross_scale_ir_init)))
         self.cross_drop_path = float(cross_drop_path)
         self.gamma = None
 
