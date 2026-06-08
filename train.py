@@ -42,6 +42,8 @@ def parse_args():
         metavar="N",
         help="覆盖默认训练轮次（默认 300）",
     )
+    parser.add_argument("--device", type=str, default="0", help="训练设备，例如 0、1 或 cpu")
+    parser.add_argument("--name", type=str, default=None, help="显式指定 runs/detect 下的实验目录名")
     parser.add_argument(
         "--resume",
         type=str,
@@ -275,7 +277,8 @@ if __name__ == "__main__":
         imgsz=[480, 640],  # 输入模型的尺寸，也是验证的尺寸
         batch=16,
         workers=0,
-        device=0,
+        device=args.device,
+        name=args.name,
         seed=0,
         deterministic=True,
         optimizer="SGD",

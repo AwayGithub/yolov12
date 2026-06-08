@@ -457,3 +457,15 @@ B3 证明问题不是 cross MLP 宽度过大导致的简单容量过拟合。B4 
 2. **B2 保留为 P4-only 对照。** B2 距 A1 仅 -0.00042，并取得 B 系列最高 fire mAP50-95，但仍存在一定过拟合且 smoke 低于 A1。
 3. **B1、B3、B4 均弃用。** B1 的 P5 cross 扰动过强；B3 缩窄 cross MLP 后高 IoU 定位退化；B4 的非对称 cross residual scale 只带来极小 smoke 收益，却损失 fire 与总体 recall。
 4. **后续不再优先调整 cross MLP 宽度或单向 scale。** 若继续探索，应考虑不替换原 A2C2f 拓扑的旁路 cross attention、模块低学习率、DropPath 或更明确的正则约束。
+
+
+### 5.7 B5/B6 实施计划
+
+B5、B6 均从 B2 独立派生，保留 P4-only Parallel Cross、cross MLP ratio=2.0、gamma init=0.01、固定 cross scale=1.0，并使用 `train.py`、RGBT-3M 全量数据、batch=16、200 epoch、每 2 epoch 验证一次。
+
+| 实验 | 保存目录 | 相对 B2 的唯一主要变量 | 目的 | 状态 |
+| -- | -- | -- | -- | -- |
+| B5 | `runs/detect/train5` | cross/gamma LR multiplier=0.1；双向共享 per-sample DropPath=0.05 | 降低跨模态分支拟合速度并随机正则化 cross delta | 训练中 |
+| B6 | `runs/detect/train6` | `gamma=0.35*sigmoid(gamma_logit)`，固定正值有界 gamma | 阻止 gamma 变为负值或无限增大，约束跨模态残差注入 | 训练中 |
+
+B5 的 DropPath 只作用于 `cross_out-cross_in`，两条模态方向共享同一个样本级 mask，不丢弃原始 cross 输入。B6 不叠加 B5 的 DropPath 或低学习率，以便独立判断正值有界 gamma 的效果。

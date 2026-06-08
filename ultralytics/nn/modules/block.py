@@ -1484,6 +1484,10 @@ class DualParallelCrossA2C2f(nn.Module):
         cross_mlp_ratio=None,
         cross_scale_rgb_init=1.0,
         cross_scale_ir_init=1.0,
+        learnable_cross_scale=True,
+        cross_drop_path=0.0,
+        gamma_mode="free",
+        gamma_max=0.35,
         e=0.5,
         g=1,
         shortcut=True,
@@ -1501,6 +1505,14 @@ class DualParallelCrossA2C2f(nn.Module):
         assert self.c_branch % 32 == 0, "Dimension of CrossABlock must be a multiple of 32."
         num_heads = self.c_branch // 32
         cross_mlp_ratio = mlp_ratio if cross_mlp_ratio is None else cross_mlp_ratio
+        if not 0.0 <= cross_drop_path < 1.0:
+            raise ValueError(f"cross_drop_path must be in [0, 1), got {cross_drop_path}.")
+        if gamma_mode not in {"free", "bounded_positive"}:
+            raise ValueError(f"Unsupported gamma_mode: {gamma_mode}.")
+        if gamma_mode == "bounded_positive" and not 0.0 < scale_init < gamma_max:
+            raise ValueError(
+                f"bounded_positive gamma requires 0 < scale_init < gamma_max, got {scale_init}, {gamma_max}."
+            )
 
         self.cv1_rgb = Conv(c1, c2, 1, 1)
         self.cv1_ir = Conv(c1, c2, 1, 1)
@@ -1510,11 +1522,44 @@ class DualParallelCrossA2C2f(nn.Module):
         self.cross_ir = nn.ModuleList(CrossABlock(self.c_branch, num_heads, cross_mlp_ratio, area) for _ in range(n))
         self.cv2_rgb = Conv(c2 * 2, c2, 1)
         self.cv2_ir = Conv(c2 * 2, c2, 1)
-        self.gamma_rgb = nn.Parameter(torch.tensor(float(scale_init)))
-        self.gamma_ir = nn.Parameter(torch.tensor(float(scale_init)))
-        self.cross_scale_rgb = nn.Parameter(torch.tensor(float(cross_scale_rgb_init)))
-        self.cross_scale_ir = nn.Parameter(torch.tensor(float(cross_scale_ir_init)))
+        self.gamma_mode = gamma_mode
+        self.gamma_max = float(gamma_max)
+        if gamma_mode == "free":
+            self.gamma_rgb = nn.Parameter(torch.tensor(float(scale_init)))
+            self.gamma_ir = nn.Parameter(torch.tensor(float(scale_init)))
+        else:
+            gamma_logit = math.log(scale_init / (gamma_max - scale_init))
+            self.gamma_rgb_logit = nn.Parameter(torch.tensor(float(gamma_logit)))
+            self.gamma_ir_logit = nn.Parameter(torch.tensor(float(gamma_logit)))
+        self.cross_scale_rgb = nn.Parameter(
+            torch.tensor(float(cross_scale_rgb_init)), requires_grad=bool(learnable_cross_scale)
+        )
+        self.cross_scale_ir = nn.Parameter(
+            torch.tensor(float(cross_scale_ir_init)), requires_grad=bool(learnable_cross_scale)
+        )
+        self.cross_drop_path = float(cross_drop_path)
         self.gamma = None
+
+    def effective_gamma_rgb(self):
+        """Return the effective RGB residual scale."""
+        if self.gamma_mode == "free":
+            return self.gamma_rgb
+        return self.gamma_max * self.gamma_rgb_logit.sigmoid()
+
+    def effective_gamma_ir(self):
+        """Return the effective IR residual scale."""
+        if self.gamma_mode == "free":
+            return self.gamma_ir
+        return self.gamma_max * self.gamma_ir_logit.sigmoid()
+
+    def _drop_cross_delta(self, rgb_delta, ir_delta):
+        """Apply one shared per-sample DropPath mask to both cross-modal directions."""
+        if not self.training or self.cross_drop_path == 0.0:
+            return rgb_delta, ir_delta
+        keep_prob = 1.0 - self.cross_drop_path
+        shape = (rgb_delta.shape[0],) + (1,) * (rgb_delta.ndim - 1)
+        mask = rgb_delta.new_empty(shape).bernoulli_(keep_prob).div_(keep_prob)
+        return rgb_delta * mask, ir_delta * mask
 
     def forward(self, x_rgb, x_ir):
         """Run self and fixed-guide cross branches in parallel, then add a scaled residual."""
@@ -1536,12 +1581,13 @@ class DualParallelCrossA2C2f(nn.Module):
             rgb_cross = block(rgb_cross, ir_cross_in)
         for block in self.cross_ir:
             ir_cross = block(ir_cross, rgb_cross_in)
-        rgb_cross = rgb_cross_in + self.cross_scale_rgb * (rgb_cross - rgb_cross_in)
-        ir_cross = ir_cross_in + self.cross_scale_ir * (ir_cross - ir_cross_in)
+        rgb_cross_delta, ir_cross_delta = self._drop_cross_delta(rgb_cross - rgb_cross_in, ir_cross - ir_cross_in)
+        rgb_cross = rgb_cross_in + self.cross_scale_rgb * rgb_cross_delta
+        ir_cross = ir_cross_in + self.cross_scale_ir * ir_cross_delta
 
         rgb_delta = self.cv2_rgb(torch.cat((rgb_self_in, rgb_cross_in, rgb_self, rgb_cross), dim=1))
         ir_delta = self.cv2_ir(torch.cat((ir_self_in, ir_cross_in, ir_self, ir_cross), dim=1))
-        return x_rgb + self.gamma_rgb * rgb_delta, x_ir + self.gamma_ir * ir_delta
+        return x_rgb + self.effective_gamma_rgb() * rgb_delta, x_ir + self.effective_gamma_ir() * ir_delta
 
 
 class DMGFusion(nn.Module):

@@ -607,6 +607,10 @@ class DualStreamDetectionModel(DetectionModel):
                 cross_mlp_ratio=float(self.yaml.get("parallel_cross_mlp_ratio", mlp_ratio)),
                 cross_scale_rgb_init=float(self.yaml.get("parallel_cross_rgb_scale_init", 1.0)),
                 cross_scale_ir_init=float(self.yaml.get("parallel_cross_ir_scale_init", 1.0)),
+                learnable_cross_scale=bool(self.yaml.get("parallel_cross_learnable_scale", True)),
+                cross_drop_path=float(self.yaml.get("parallel_cross_drop_path", 0.0)),
+                gamma_mode=str(self.yaml.get("parallel_cross_gamma_mode", "free")),
+                gamma_max=float(self.yaml.get("parallel_cross_gamma_max", 0.35)),
                 scale_init=float(self.yaml.get("parallel_cross_gamma_init", 0.01)),
             )
             new_layer.i = old_layer.i
@@ -750,11 +754,23 @@ class DualStreamDetectionModel(DetectionModel):
         stage_order = {stage: i for i, stage in enumerate(self.FUSION_LAYER_INDICES)}
         for layer_idx, stage_name in sorted(layer_to_stage.items(), key=lambda x: stage_order[x[1]]):
             layer = self.backbone_rgb[layer_idx]
-            debug[f"pcross/{stage_name}_gamma_rgb"] = layer.gamma_rgb.detach().float().item()
-            debug[f"pcross/{stage_name}_gamma_ir"] = layer.gamma_ir.detach().float().item()
+            debug[f"pcross/{stage_name}_gamma_rgb"] = layer.effective_gamma_rgb().detach().float().item()
+            debug[f"pcross/{stage_name}_gamma_ir"] = layer.effective_gamma_ir().detach().float().item()
+            if layer.gamma_mode == "bounded_positive":
+                debug[f"pcross/{stage_name}_gamma_rgb_logit"] = layer.gamma_rgb_logit.detach().float().item()
+                debug[f"pcross/{stage_name}_gamma_ir_logit"] = layer.gamma_ir_logit.detach().float().item()
             debug[f"pcross/{stage_name}_cross_scale_rgb"] = layer.cross_scale_rgb.detach().float().item()
             debug[f"pcross/{stage_name}_cross_scale_ir"] = layer.cross_scale_ir.detach().float().item()
         return debug
+
+    def optimizer_param_lr_mult(self, fullname, param):
+        """Return optional parameter-specific learning-rate multipliers for Parallel Cross experiments."""
+        del param
+        if ".cross_rgb." in fullname or ".cross_ir." in fullname:
+            return float(self.yaml.get("parallel_cross_cross_lr_mult", 1.0))
+        if any(name in fullname for name in ("gamma_rgb", "gamma_ir")):
+            return float(self.yaml.get("parallel_cross_gamma_lr_mult", 1.0))
+        return 1.0
 
     def _predict_once(self, x, profile=False, visualize=False, embed=None):
         """双分支前向传播。输入 x 形状 (B, 6, H, W)，0:3=IR_RGB, 3:6=VIS_RGB。"""

@@ -378,7 +378,7 @@ class BaseTrainer:
                     for j, x in enumerate(self.optimizer.param_groups):
                         # Bias lr falls from 0.1 to lr0, all other lrs rise from 0.0 to lr0
                         x["lr"] = np.interp(
-                            ni, xi, [self.args.warmup_bias_lr if j == 0 else 0.0, x["initial_lr"] * self.lf(epoch)]
+                            ni, xi, [self.args.warmup_bias_lr if x.get("warmup_bias", False) else 0.0, x["initial_lr"] * self.lf(epoch)]
                         )
                         if "momentum" in x:
                             x["momentum"] = np.interp(ni, xi, [self.args.warmup_momentum, self.args.momentum])
@@ -803,7 +803,6 @@ class BaseTrainer:
         Returns:
             (torch.optim.Optimizer): The constructed optimizer.
         """
-        g = [], [], []  # optimizer parameter groups
         bn = tuple(v for k, v in nn.__dict__.items() if "Norm" in k)  # normalization layers, i.e. BatchNorm2d()
         if name == "auto":
             LOGGER.info(
@@ -811,39 +810,57 @@ class BaseTrainer:
                 f"ignoring 'lr0={self.args.lr0}' and 'momentum={self.args.momentum}' and "
                 f"determining best 'optimizer', 'lr0' and 'momentum' automatically... "
             )
-            nc = getattr(model, "nc", 10)  # number of classes
-            lr_fit = round(0.002 * 5 / (4 + nc), 6)  # lr0 fit equation to 6 decimal places
+            nc = getattr(model, "nc", 10)
+            lr_fit = round(0.002 * 5 / (4 + nc), 6)
             name, lr, momentum = ("SGD", 0.01, 0.9) if iterations > 10000 else ("AdamW", lr_fit, 0.9)
-            self.args.warmup_bias_lr = 0.0  # no higher than 0.01 for Adam
+            self.args.warmup_bias_lr = 0.0
 
+        lr_mult_fn = getattr(model, "optimizer_param_lr_mult", None)
+        grouped = {}
         for module_name, module in model.named_modules():
             for param_name, param in module.named_parameters(recurse=False):
+                if not param.requires_grad:
+                    continue
                 fullname = f"{module_name}.{param_name}" if module_name else param_name
-                if "bias" in fullname:  # bias (no decay)
-                    g[2].append(param)
-                elif isinstance(module, bn):  # weight (no decay)
-                    g[1].append(param)
-                else:  # weight (with decay)
-                    g[0].append(param)
+                category = "bias" if "bias" in fullname else "norm" if isinstance(module, bn) else "weight"
+                lr_mult = float(lr_mult_fn(fullname, param)) if lr_mult_fn else 1.0
+                if lr_mult <= 0:
+                    raise ValueError(f"Optimizer learning-rate multiplier must be positive, got {lr_mult} for {fullname}.")
+                grouped.setdefault((category, lr_mult), []).append(param)
+
+        category_order = {"bias": 0, "weight": 1, "norm": 2}
+        param_groups = []
+        for (category, lr_mult), params in sorted(
+            grouped.items(), key=lambda item: (category_order[item[0][0]], item[0][1])
+        ):
+            param_groups.append(
+                {
+                    "params": params,
+                    "lr": lr * lr_mult,
+                    "weight_decay": decay if category == "weight" else 0.0,
+                    "lr_mult": lr_mult,
+                    "warmup_bias": category == "bias",
+                    "category": category,
+                }
+            )
 
         optimizers = {"Adam", "Adamax", "AdamW", "NAdam", "RAdam", "RMSProp", "SGD", "auto"}
         name = {x.lower(): x for x in optimizers}.get(name.lower())
         if name in {"Adam", "Adamax", "AdamW", "NAdam", "RAdam"}:
-            optimizer = getattr(optim, name, optim.Adam)(g[2], lr=lr, betas=(momentum, 0.999), weight_decay=0.0)
+            optimizer = getattr(optim, name, optim.Adam)(param_groups, lr=lr, betas=(momentum, 0.999))
         elif name == "RMSProp":
-            optimizer = optim.RMSprop(g[2], lr=lr, momentum=momentum)
+            optimizer = optim.RMSprop(param_groups, lr=lr, momentum=momentum)
         elif name == "SGD":
-            optimizer = optim.SGD(g[2], lr=lr, momentum=momentum, nesterov=True)
+            optimizer = optim.SGD(param_groups, lr=lr, momentum=momentum, nesterov=True)
         else:
             raise NotImplementedError(
-                f"Optimizer '{name}' not found in list of available optimizers {optimizers}. "
-                "Request support for addition optimizers at https://github.com/ultralytics/ultralytics."
+                f"Optimizer {name!r} not found in list of available optimizers {optimizers}. "
+                "Request support for additional optimizers at https://github.com/ultralytics/ultralytics."
             )
 
-        optimizer.add_param_group({"params": g[0], "weight_decay": decay})  # add g0 with weight_decay
-        optimizer.add_param_group({"params": g[1], "weight_decay": 0.0})  # add g1 (BatchNorm2d weights)
-        LOGGER.info(
-            f"{colorstr('optimizer:')} {type(optimizer).__name__}(lr={lr}, momentum={momentum}) with parameter groups "
-            f"{len(g[1])} weight(decay=0.0), {len(g[0])} weight(decay={decay}), {len(g[2])} bias(decay=0.0)"
+        group_summary = ", ".join(
+            f"{len(group['params'])} {group['category']}(decay={group['weight_decay']}, lr_mult={group['lr_mult']})"
+            for group in optimizer.param_groups
         )
+        LOGGER.info(f"{colorstr('optimizer:')} {type(optimizer).__name__}(lr={lr}, momentum={momentum}): {group_summary}")
         return optimizer
