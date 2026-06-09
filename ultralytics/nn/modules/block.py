@@ -1492,6 +1492,8 @@ class DualParallelCrossA2C2f(nn.Module):
         g=1,
         shortcut=True,
         scale_init=0.01,
+        self_depth=None,
+        cross_depth=None,
     ):
         """Initialize a P4/P5 dual-stream A2C2f replacement using four half-width concat paths."""
         super().__init__()
@@ -1504,6 +1506,10 @@ class DualParallelCrossA2C2f(nn.Module):
         self.c_branch = c2 // 2
         assert self.c_branch % 32 == 0, "Dimension of CrossABlock must be a multiple of 32."
         num_heads = self.c_branch // 32
+        self_depth = n if self_depth is None else int(self_depth)
+        cross_depth = n if cross_depth is None else int(cross_depth)
+        if self_depth < 1 or cross_depth < 1:
+            raise ValueError(f"self_depth and cross_depth must be positive, got {self_depth}, {cross_depth}.")
         cross_mlp_ratio = mlp_ratio if cross_mlp_ratio is None else cross_mlp_ratio
         if not 0.0 <= cross_drop_path < 1.0:
             raise ValueError(f"cross_drop_path must be in [0, 1), got {cross_drop_path}.")
@@ -1516,10 +1522,14 @@ class DualParallelCrossA2C2f(nn.Module):
 
         self.cv1_rgb = Conv(c1, c2, 1, 1)
         self.cv1_ir = Conv(c1, c2, 1, 1)
-        self.self_rgb = nn.ModuleList(ABlock(self.c_branch, num_heads, mlp_ratio, area) for _ in range(n))
-        self.self_ir = nn.ModuleList(ABlock(self.c_branch, num_heads, mlp_ratio, area) for _ in range(n))
-        self.cross_rgb = nn.ModuleList(CrossABlock(self.c_branch, num_heads, cross_mlp_ratio, area) for _ in range(n))
-        self.cross_ir = nn.ModuleList(CrossABlock(self.c_branch, num_heads, cross_mlp_ratio, area) for _ in range(n))
+        self.self_rgb = nn.ModuleList(ABlock(self.c_branch, num_heads, mlp_ratio, area) for _ in range(self_depth))
+        self.self_ir = nn.ModuleList(ABlock(self.c_branch, num_heads, mlp_ratio, area) for _ in range(self_depth))
+        self.cross_rgb = nn.ModuleList(
+            CrossABlock(self.c_branch, num_heads, cross_mlp_ratio, area) for _ in range(cross_depth)
+        )
+        self.cross_ir = nn.ModuleList(
+            CrossABlock(self.c_branch, num_heads, cross_mlp_ratio, area) for _ in range(cross_depth)
+        )
         self.cv2_rgb = Conv(c2 * 2, c2, 1)
         self.cv2_ir = Conv(c2 * 2, c2, 1)
         self.gamma_mode = gamma_mode

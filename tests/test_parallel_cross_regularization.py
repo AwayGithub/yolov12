@@ -13,6 +13,20 @@ from ultralytics.nn.tasks import DualStreamDetectionModel
 
 B5_CFG = "yolov12-dual-p2-dmg-init8d-p3aux-fredft-p3-pcross-p4-reg.yaml"
 B6_CFG = "yolov12-dual-p2-dmg-init8d-p3aux-fredft-p3-pcross-p4-posgamma.yaml"
+B7_CFG = "yolov12-dual-p2-dmg-init8d-p3aux-fredft-p3-pcross-p4-self4-cross2.yaml"
+B8_CFG = "yolov12-dual-p2-dmg-init8d-p3aux-fredft-p3-pcross-p4-self4-cross4.yaml"
+
+
+
+@pytest.mark.parametrize("cfg,self_depth,cross_depth", [(B7_CFG, 4, 2), (B8_CFG, 4, 4)])
+def test_parallel_cross_configs_use_independent_branch_depths(cfg, self_depth, cross_depth):
+    """B7 and B8 vary only the intended P4 self and cross branch depths."""
+    model = DualStreamDetectionModel(cfg, nc=3, verbose=False)
+    layer = model.backbone_rgb[6]
+
+    assert len(layer.self_rgb) == len(layer.self_ir) == self_depth
+    assert len(layer.cross_rgb) == len(layer.cross_ir) == cross_depth
+    assert layer.cross_rgb[0].mlp[0].conv.out_channels == 128
 
 
 def test_shared_cross_drop_path_and_fixed_scale():

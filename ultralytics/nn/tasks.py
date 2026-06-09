@@ -602,6 +602,8 @@ class DualStreamDetectionModel(DetectionModel):
                 c1,
                 c2,
                 n=n,
+                self_depth=self.yaml.get("parallel_cross_self_depth"),
+                cross_depth=self.yaml.get("parallel_cross_cross_depth"),
                 area=area,
                 mlp_ratio=mlp_ratio,
                 cross_mlp_ratio=float(self.yaml.get("parallel_cross_mlp_ratio", mlp_ratio)),
