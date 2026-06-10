@@ -1590,6 +1590,7 @@ class DualParallelCrossA2C2f(nn.Module):
 
     def forward(self, x_rgb, x_ir):
         """Run self and fixed-guide cross branches in parallel, then add a scaled residual."""
+        stage_concat = getattr(self, "stage_concat", False)
         z_rgb = self.cv1_rgb(x_rgb)
         z_ir = self.cv1_ir(x_ir)
         rgb_self_in, rgb_cross_in = z_rgb.chunk(2, dim=1)
@@ -1599,28 +1600,28 @@ class DualParallelCrossA2C2f(nn.Module):
         ir_self = ir_self_in
         for i, block in enumerate(self.self_rgb, 1):
             rgb_self = block(rgb_self)
-            if self.stage_concat and i == self.self_mid_index:
+            if stage_concat and i == self.self_mid_index:
                 rgb_self_mid = rgb_self
         for i, block in enumerate(self.self_ir, 1):
             ir_self = block(ir_self)
-            if self.stage_concat and i == self.self_mid_index:
+            if stage_concat and i == self.self_mid_index:
                 ir_self_mid = ir_self
 
         rgb_cross = rgb_cross_in
         ir_cross = ir_cross_in
         for i, block in enumerate(self.cross_rgb, 1):
             rgb_cross = block(rgb_cross, ir_cross_in)
-            if self.stage_concat and i == self.cross_mid_index:
+            if stage_concat and i == self.cross_mid_index:
                 rgb_cross_mid = rgb_cross
         for i, block in enumerate(self.cross_ir, 1):
             ir_cross = block(ir_cross, rgb_cross_in)
-            if self.stage_concat and i == self.cross_mid_index:
+            if stage_concat and i == self.cross_mid_index:
                 ir_cross_mid = ir_cross
         rgb_cross_delta, ir_cross_delta = self._drop_cross_delta(rgb_cross - rgb_cross_in, ir_cross - ir_cross_in)
         rgb_cross = rgb_cross_in + self.cross_scale_rgb * rgb_cross_delta
         ir_cross = ir_cross_in + self.cross_scale_ir * ir_cross_delta
 
-        if self.stage_concat:
+        if stage_concat:
             rgb_cross_mid = rgb_cross_in + self.cross_mid_scale_rgb * (rgb_cross_mid - rgb_cross_in)
             ir_cross_mid = ir_cross_in + self.cross_mid_scale_ir * (ir_cross_mid - ir_cross_in)
             rgb_paths = (rgb_self_in, rgb_cross_in, rgb_self_mid, rgb_cross_mid, rgb_self, rgb_cross)
