@@ -604,6 +604,9 @@ class DualStreamDetectionModel(DetectionModel):
                 n=n,
                 self_depth=self.yaml.get("parallel_cross_self_depth"),
                 cross_depth=self.yaml.get("parallel_cross_cross_depth"),
+                stage_concat=bool(self.yaml.get("parallel_cross_stage_concat", False)),
+                cross_mid_scale_rgb_init=float(self.yaml.get("parallel_cross_mid_rgb_scale_init", 1.0)),
+                cross_mid_scale_ir_init=float(self.yaml.get("parallel_cross_mid_ir_scale_init", 1.0)),
                 area=area,
                 mlp_ratio=mlp_ratio,
                 cross_mlp_ratio=float(self.yaml.get("parallel_cross_mlp_ratio", mlp_ratio)),
@@ -763,6 +766,9 @@ class DualStreamDetectionModel(DetectionModel):
                 debug[f"pcross/{stage_name}_gamma_ir_logit"] = layer.gamma_ir_logit.detach().float().item()
             debug[f"pcross/{stage_name}_cross_scale_rgb"] = layer.cross_scale_rgb.detach().float().item()
             debug[f"pcross/{stage_name}_cross_scale_ir"] = layer.cross_scale_ir.detach().float().item()
+            if hasattr(layer, "cross_mid_scale_rgb"):
+                debug[f"pcross/{stage_name}_cross_mid_scale_rgb"] = layer.cross_mid_scale_rgb.detach().float().item()
+                debug[f"pcross/{stage_name}_cross_mid_scale_ir"] = layer.cross_mid_scale_ir.detach().float().item()
         return debug
 
     def optimizer_param_lr_mult(self, fullname, param):

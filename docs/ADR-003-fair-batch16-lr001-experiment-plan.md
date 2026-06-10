@@ -532,3 +532,91 @@ B5 最终参数为 `gamma_rgb=+0.16992`、`gamma_ir=-0.19629`、固定 cross sca
 2. **B6 优于 B5，但收益不足。** B6 相对 B5 的 all/fire mAP50-95 提升 `+0.00096/+0.00568`，说明保留稳定的正向跨模态注入优于低学习率加 DropPath；但仍未达到 B2。
 3. **B5 的正则化方向不再继续。** 它轻微改善 smoke，却显著损伤 fire，且提前触发 EarlyStopping。
 4. **B6 的正值有界 gamma 可作为诊断证据，不作为保留配置。** 它证明负 gamma 并非 B2 性能的唯一问题；过强限制反而降低最终上限。
+
+
+### 5.8 B2 相对 A1 的 smoke 逐层 neck 诊断
+
+为了确认 B2 的 smoke 漏检到底发生在 neck 的哪一段，而不是只看 backbone 或最终 head 的汇总输出，这里对 `A1 检出、B2 漏检` 的 182 个 smoke 目标做了逐层跟踪，并用 182 个按尺寸匹配的 `A1/B2 都检出` smoke 目标作为对照。统计位置为 neck 的六个关键节点：
+
+- `11`: `topdown_p4`
+- `14`: `topdown_p3`
+- `17`: `topdown_p2`
+- `20`: `bottomup_p3`
+- `23`: `bottomup_p4`
+- `26`: `bottomup_p5`
+
+统计指标主要看 GT box 内的 `local_contrast`，并辅以 `roi_peak`。结果表明，B2 不是在 backbone P4 一次性把 smoke 学坏，而是在 neck 的 top-down / bottom-up 传递中把烟雾特征重组得更尖、更窄，但不够稳，最终导致分类头置信度被压低。
+
+#### 5.8.1 漏检组的逐层变化
+
+在 `A1 检出、B2 漏检` 的 182 个样本上，B2 相对 A1 的 `local_contrast` 中位数变化如下：
+
+| neck 节点 | A1 中位数 | B2 中位数 | B2-A1 |
+| -- | --: | --: | --: |
+| topdown_p4 | 1.03073 | 1.01768 | -0.01306 |
+| topdown_p3 | 1.10121 | 1.07390 | -0.02731 |
+| topdown_p2 | 1.08309 | 1.09561 | +0.01252 |
+| bottomup_p3 | 1.16072 | 1.14868 | -0.01204 |
+| bottomup_p4 | 1.11724 | 1.09966 | -0.01758 |
+| bottomup_p5 | 1.03928 | 1.02298 | -0.01630 |
+
+这说明：
+
+1. `topdown_p4 -> topdown_p3` 是第一段明显下滑点，B2 在这里就已经比 A1 弱。
+2. `topdown_p2` 的对比度虽然短暂回升，但只是局部补偿，不足以恢复 smoke 的稳定语义。
+3. `bottomup_p3 -> bottomup_p4 -> bottomup_p5` 才是最终压低 smoke 的关键段，B2 在这三层持续弱于 A1。
+
+`roi_peak` 也呈现相同形态：B2 在 `topdown_p3/topdown_p2` 会抬高局部峰值，但到 `bottomup_p4/p5` 峰值回落，说明特征被加工成更尖锐但更不稳定的响应，而不是更完整的烟雾区域证据。
+
+#### 5.8.2 对照组的逐层变化
+
+在 `A1 与 B2 都检出` 的对照组上，B2 反而能把 neck 的中高层特征做得更强，尤其是 `topdown_p2` 和 `bottomup_p3`：
+
+| neck 节点 | A1 中位数 | B2 中位数 | B2-A1 |
+| -- | --: | --: | --: |
+| topdown_p4 | 1.03590 | 1.03362 | -0.00228 |
+| topdown_p3 | 1.13065 | 1.16114 | +0.03049 |
+| topdown_p2 | 1.09049 | 1.19491 | +0.10443 |
+| bottomup_p3 | 1.22505 | 1.28491 | +0.05986 |
+| bottomup_p4 | 1.16960 | 1.19811 | +0.02851 |
+| bottomup_p5 | 1.07466 | 1.06352 | -0.01114 |
+
+这组结果说明 B2 并不是整体能力变差，而是它对“正常能检出的 smoke”更强，但对“低对比、容易漏检的 smoke”更容易把特征语义重组坏。这也解释了为什么 B2 在总体指标上接近 A1，但 smoke recall 反而下降。
+
+#### 5.8.3 结论
+
+1. **B2 的 smoke 问题主要不是 backbone P4 激活强度不够，而是 neck 的传播和重组方式变了。**
+2. **漏检样本的主要损失发生在 `topdown_p3` 之后，并在 `bottomup_p4/p5` 被放大。**
+3. **B2 对正常 smoke 样本的 neck 表征更强，但对低对比、32-128px 的烟雾更容易把有效响应压成高峰值、低稳定性的碎片化特征。**
+4. **这支持后续继续优先尝试“恢复原始 A2C2f 的模态内深度和多阶段聚合”，而不是继续单纯增加 cross 分支深度。**
+
+对应的逐层统计图已保存为：
+
+- `runs/detect/adr003/smoke_delta/neck_trace_local_contrast.png`
+
+
+### 5.9 B9：B8 多阶段 self/cross 特征聚合
+
+B9 以 B8 为基线，保留 P4 `self_depth=4`、`cross_depth=4`、cross MLP ratio=`2.0` 与固定原始 opposite-modal guide。唯一主要结构变化是恢复类似原始 A2C2f 的两组 ABlock 中间特征聚合。
+
+每条 self/cross 半宽分支将 4 个 ABlock 分为两组，每组 2 个 block，并记录输入、第一组输出和第二组输出。cross 分支的中间与最终 checkpoint 使用独立可学习缩放：
+
+```text
+cross_mid_scaled = cross_in + cross_mid_scale * (raw_cross_mid - cross_in)
+cross_out_scaled = cross_in + cross_out_scale * (raw_cross_out - cross_in)
+```
+
+每个模态最终拼接：
+
+```text
+self_in + cross_in + self_mid + cross_mid_scaled + self_out + cross_out_scaled = 3C
+Conv(3C, C) -> gamma residual
+```
+
+RGB/IR 分别具有独立的 mid/out scale，共四个可学习标量，均初始化为 `1.0`。第二组 CrossABlock 继续接收未缩放的 raw 中间特征，scale 仅控制 checkpoint 进入最终 concat 的强度。
+
+| 实验 | 配置 | 参数量 | 训练目录 | 状态 |
+| -- | -- | --: | -- | -- |
+| B9 | B8 + P4 self/cross 两组中间特征 concat + 独立 mid/out cross scale | 5,250,292 | `runs/detect/train9` | GPU 2 持久化训练中 |
+
+B9 用于验证 B2/B8 的 smoke 损失是否主要来自原始 A2C2f 多阶段聚合拓扑缺失。除 P4 stage concat 与 mid scale 外，其余模型和训练参数均保持 B8 不变。

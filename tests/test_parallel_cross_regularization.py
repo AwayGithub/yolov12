@@ -15,7 +15,7 @@ B5_CFG = "yolov12-dual-p2-dmg-init8d-p3aux-fredft-p3-pcross-p4-reg.yaml"
 B6_CFG = "yolov12-dual-p2-dmg-init8d-p3aux-fredft-p3-pcross-p4-posgamma.yaml"
 B7_CFG = "yolov12-dual-p2-dmg-init8d-p3aux-fredft-p3-pcross-p4-self4-cross2.yaml"
 B8_CFG = "yolov12-dual-p2-dmg-init8d-p3aux-fredft-p3-pcross-p4-self4-cross4.yaml"
-
+B9_CFG = "yolov12-dual-p2-dmg-init8d-p3aux-fredft-p3-pcross-p4-self4-cross4-stageconcat.yaml"
 
 
 @pytest.mark.parametrize("cfg,self_depth,cross_depth", [(B7_CFG, 4, 2), (B8_CFG, 4, 4)])
@@ -81,3 +81,55 @@ def test_b5_optimizer_applies_cross_and_gamma_lr_multiplier():
             continue
         is_reduced_lr = any(key in name for key in (".cross_rgb.", ".cross_ir.", "gamma_rgb", "gamma_ir"))
         assert param_groups[id(param)]["lr_mult"] == pytest.approx(0.1 if is_reduced_lr else 1.0)
+
+
+def test_b9_stage_concat_uses_three_c_projection_and_independent_scales():
+    """B9 aggregates input, midpoint, and final branch features with independent cross scales."""
+    model = DualStreamDetectionModel(B9_CFG, nc=3, verbose=False)
+    layer = model.backbone_rgb[6]
+
+    assert layer.stage_concat is True
+    assert len(layer.self_rgb) == len(layer.self_ir) == 4
+    assert len(layer.cross_rgb) == len(layer.cross_ir) == 4
+    assert layer.self_mid_index == layer.cross_mid_index == 2
+    assert layer.cv2_rgb.conv.in_channels == layer.c_branch * 6
+    assert layer.cv2_ir.conv.in_channels == layer.c_branch * 6
+    assert layer.cross_mid_scale_rgb.item() == pytest.approx(1.0)
+    assert layer.cross_mid_scale_ir.item() == pytest.approx(1.0)
+    assert layer.cross_scale_rgb.item() == pytest.approx(1.0)
+    assert layer.cross_scale_ir.item() == pytest.approx(1.0)
+    assert layer.cross_mid_scale_rgb is not layer.cross_scale_rgb
+    assert layer.cross_mid_scale_ir is not layer.cross_scale_ir
+    debug = model.adapter_debug_state()
+    assert debug["pcross/p4_cross_mid_scale_rgb"] == pytest.approx(1.0)
+    assert debug["pcross/p4_cross_mid_scale_ir"] == pytest.approx(1.0)
+
+
+def test_b9_stage_concat_forward_backward_and_scale_independence():
+    """B9 propagates gradients through independent midpoint and final cross scales."""
+    module = DualParallelCrossA2C2f(128, 128, self_depth=4, cross_depth=4, stage_concat=True)
+    x_rgb = torch.randn(2, 128, 12, 16, requires_grad=True)
+    x_ir = torch.randn(2, 128, 12, 16, requires_grad=True)
+
+    y_rgb, y_ir = module(x_rgb, x_ir)
+    (y_rgb.mean() + y_ir.mean()).backward()
+
+    assert y_rgb.shape == x_rgb.shape
+    assert y_ir.shape == x_ir.shape
+    for scale in (
+        module.cross_mid_scale_rgb,
+        module.cross_mid_scale_ir,
+        module.cross_scale_rgb,
+        module.cross_scale_ir,
+    ):
+        assert scale.grad is not None
+
+
+def test_b8_default_concat_shape_is_unchanged():
+    """B8 and earlier configurations retain the original four-path 2C projection."""
+    model = DualStreamDetectionModel(B8_CFG, nc=3, verbose=False)
+    layer = model.backbone_rgb[6]
+
+    assert layer.stage_concat is False
+    assert layer.cv2_rgb.conv.in_channels == layer.c_branch * 4
+    assert not hasattr(layer, "cross_mid_scale_rgb")

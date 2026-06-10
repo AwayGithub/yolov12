@@ -1494,6 +1494,9 @@ class DualParallelCrossA2C2f(nn.Module):
         scale_init=0.01,
         self_depth=None,
         cross_depth=None,
+        stage_concat=False,
+        cross_mid_scale_rgb_init=1.0,
+        cross_mid_scale_ir_init=1.0,
     ):
         """Initialize a P4/P5 dual-stream A2C2f replacement using four half-width concat paths."""
         super().__init__()
@@ -1510,6 +1513,13 @@ class DualParallelCrossA2C2f(nn.Module):
         cross_depth = n if cross_depth is None else int(cross_depth)
         if self_depth < 1 or cross_depth < 1:
             raise ValueError(f"self_depth and cross_depth must be positive, got {self_depth}, {cross_depth}.")
+        self.stage_concat = bool(stage_concat)
+        if self.stage_concat and (self_depth % 2 or cross_depth % 2):
+            raise ValueError(
+                f"stage_concat requires even self_depth and cross_depth, got {self_depth}, {cross_depth}."
+            )
+        self.self_mid_index = self_depth // 2
+        self.cross_mid_index = cross_depth // 2
         cross_mlp_ratio = mlp_ratio if cross_mlp_ratio is None else cross_mlp_ratio
         if not 0.0 <= cross_drop_path < 1.0:
             raise ValueError(f"cross_drop_path must be in [0, 1), got {cross_drop_path}.")
@@ -1530,8 +1540,9 @@ class DualParallelCrossA2C2f(nn.Module):
         self.cross_ir = nn.ModuleList(
             CrossABlock(self.c_branch, num_heads, cross_mlp_ratio, area) for _ in range(cross_depth)
         )
-        self.cv2_rgb = Conv(c2 * 2, c2, 1)
-        self.cv2_ir = Conv(c2 * 2, c2, 1)
+        cv2_in_channels = c2 * (3 if self.stage_concat else 2)
+        self.cv2_rgb = Conv(cv2_in_channels, c2, 1)
+        self.cv2_ir = Conv(cv2_in_channels, c2, 1)
         self.gamma_mode = gamma_mode
         self.gamma_max = float(gamma_max)
         if gamma_mode == "free":
@@ -1544,9 +1555,15 @@ class DualParallelCrossA2C2f(nn.Module):
         if learnable_cross_scale:
             self.cross_scale_rgb = nn.Parameter(torch.tensor(float(cross_scale_rgb_init)))
             self.cross_scale_ir = nn.Parameter(torch.tensor(float(cross_scale_ir_init)))
+            if self.stage_concat:
+                self.cross_mid_scale_rgb = nn.Parameter(torch.tensor(float(cross_mid_scale_rgb_init)))
+                self.cross_mid_scale_ir = nn.Parameter(torch.tensor(float(cross_mid_scale_ir_init)))
         else:
             self.register_buffer("cross_scale_rgb", torch.tensor(float(cross_scale_rgb_init)))
             self.register_buffer("cross_scale_ir", torch.tensor(float(cross_scale_ir_init)))
+            if self.stage_concat:
+                self.register_buffer("cross_mid_scale_rgb", torch.tensor(float(cross_mid_scale_rgb_init)))
+                self.register_buffer("cross_mid_scale_ir", torch.tensor(float(cross_mid_scale_ir_init)))
         self.cross_drop_path = float(cross_drop_path)
         self.gamma = None
 
@@ -1580,23 +1597,39 @@ class DualParallelCrossA2C2f(nn.Module):
 
         rgb_self = rgb_self_in
         ir_self = ir_self_in
-        for block in self.self_rgb:
+        for i, block in enumerate(self.self_rgb, 1):
             rgb_self = block(rgb_self)
-        for block in self.self_ir:
+            if self.stage_concat and i == self.self_mid_index:
+                rgb_self_mid = rgb_self
+        for i, block in enumerate(self.self_ir, 1):
             ir_self = block(ir_self)
+            if self.stage_concat and i == self.self_mid_index:
+                ir_self_mid = ir_self
 
         rgb_cross = rgb_cross_in
         ir_cross = ir_cross_in
-        for block in self.cross_rgb:
+        for i, block in enumerate(self.cross_rgb, 1):
             rgb_cross = block(rgb_cross, ir_cross_in)
-        for block in self.cross_ir:
+            if self.stage_concat and i == self.cross_mid_index:
+                rgb_cross_mid = rgb_cross
+        for i, block in enumerate(self.cross_ir, 1):
             ir_cross = block(ir_cross, rgb_cross_in)
+            if self.stage_concat and i == self.cross_mid_index:
+                ir_cross_mid = ir_cross
         rgb_cross_delta, ir_cross_delta = self._drop_cross_delta(rgb_cross - rgb_cross_in, ir_cross - ir_cross_in)
         rgb_cross = rgb_cross_in + self.cross_scale_rgb * rgb_cross_delta
         ir_cross = ir_cross_in + self.cross_scale_ir * ir_cross_delta
 
-        rgb_delta = self.cv2_rgb(torch.cat((rgb_self_in, rgb_cross_in, rgb_self, rgb_cross), dim=1))
-        ir_delta = self.cv2_ir(torch.cat((ir_self_in, ir_cross_in, ir_self, ir_cross), dim=1))
+        if self.stage_concat:
+            rgb_cross_mid = rgb_cross_in + self.cross_mid_scale_rgb * (rgb_cross_mid - rgb_cross_in)
+            ir_cross_mid = ir_cross_in + self.cross_mid_scale_ir * (ir_cross_mid - ir_cross_in)
+            rgb_paths = (rgb_self_in, rgb_cross_in, rgb_self_mid, rgb_cross_mid, rgb_self, rgb_cross)
+            ir_paths = (ir_self_in, ir_cross_in, ir_self_mid, ir_cross_mid, ir_self, ir_cross)
+        else:
+            rgb_paths = (rgb_self_in, rgb_cross_in, rgb_self, rgb_cross)
+            ir_paths = (ir_self_in, ir_cross_in, ir_self, ir_cross)
+        rgb_delta = self.cv2_rgb(torch.cat(rgb_paths, dim=1))
+        ir_delta = self.cv2_ir(torch.cat(ir_paths, dim=1))
         return x_rgb + self.effective_gamma_rgb() * rgb_delta, x_ir + self.effective_gamma_ir() * ir_delta
 
 
