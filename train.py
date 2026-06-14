@@ -44,6 +44,7 @@ def parse_args():
     )
     parser.add_argument("--device", type=str, default="0", help="训练设备，例如 0、1 或 cpu")
     parser.add_argument("--name", type=str, default=None, help="显式指定 runs/detect 下的实验目录名")
+    parser.add_argument("--save_period", type=int, default=-1, help="每隔N个epoch保存checkpoint；小于1时关闭")
     parser.add_argument(
         "--resume",
         type=str,
@@ -74,6 +75,20 @@ def parse_args():
         default=10,
         metavar="N",
         help="每个 epoch 打印前 N 个 step 的梯度范数（默认 10）",
+    )
+    parser.add_argument(
+        "--gradient_probe",
+        action="store_true",
+        help="在固定验证 probe set 上运行只读类别梯度竞争诊断",
+    )
+    parser.add_argument("--gradient_probe_small_period", type=int, default=2)
+    parser.add_argument("--gradient_probe_small_per_stratum", type=int, default=12)
+    parser.add_argument("--gradient_probe_full_per_stratum", type=int, default=64)
+    parser.add_argument("--gradient_probe_batch", type=int, default=2)
+    parser.add_argument(
+        "--gradient_probe_full_epochs",
+        type=str,
+        default="4,10,20,28,32,36,40,50,60,80,100,120,140,160,180,190,200",
     )
     return parser.parse_args()
 
@@ -270,6 +285,25 @@ if __name__ == "__main__":
         model.add_callback("on_train_epoch_end", _remove_grad_hooks)
         print(f"[grad-hooks] Debug mode: first {args.grad_debug_steps} steps per epoch.")
 
+    if args.gradient_probe:
+        from ultralytics.utils.training_gradient_probe import TrainingGradientProbe
+
+        full_epochs = tuple(int(value) for value in args.gradient_probe_full_epochs.split(",") if value.strip())
+        gradient_probe = TrainingGradientProbe(
+            small_period=args.gradient_probe_small_period,
+            small_per_stratum=args.gradient_probe_small_per_stratum,
+            full_per_stratum=args.gradient_probe_full_per_stratum,
+            full_epochs=full_epochs,
+            batch_size=args.gradient_probe_batch,
+            seed=0,
+        )
+        model.add_callback("on_train_start", gradient_probe.setup)
+        model.add_callback("on_fit_epoch_end", gradient_probe.on_fit_epoch_end)
+        print(
+            "[gradient-probe] Enabled: "
+            f"small every {args.gradient_probe_small_period} epochs; full epochs={full_epochs}."
+        )
+
     results = model.train(
         data=data_cfg,
         resume=bool(args.resume),
@@ -291,4 +325,5 @@ if __name__ == "__main__":
         warmup_bias_lr=0.0,
         cos_lr=False,
         val_period=2,
+        save_period=args.save_period,
     )
