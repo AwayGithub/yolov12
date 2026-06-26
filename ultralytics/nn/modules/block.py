@@ -1634,6 +1634,110 @@ class DualParallelCrossA2C2f(nn.Module):
         return x_rgb + self.effective_gamma_rgb() * rgb_delta, x_ir + self.effective_gamma_ir() * ir_delta
 
 
+class PhysicalGuidance(nn.Module):
+    """Lightweight physical guidance module for ADR-004 C1.
+
+    Computes low-level RGB/IR structure maps from the input images, encodes them
+    with a small CNN, and injects the result as a residual into a fused neck/backbone
+    feature (typically P2 or P3). The residual gate starts near zero so the module
+    begins as an identity mapping and only learns to use physical cues when they
+    improve the task.
+
+    Args:
+        fused_channels: Number of channels in the fused feature map to be enhanced.
+        hidden_channels: Intermediate channel count for the physical encoder.
+        num_inputs: Number of physical maps stacked as input. Default 6 corresponds to
+            RGB gradient, IR gradient, RGB local contrast, IR local contrast,
+            cross-modal edge consistency, and cross-modal edge discrepancy.
+    """
+
+    def __init__(self, fused_channels: int, hidden_channels: int = 32, num_inputs: int = 6):
+        """Initialize the physical guidance module."""
+        super().__init__()
+        self.fused_channels = fused_channels
+        self.hidden_channels = hidden_channels
+
+        self.phys_encoder = nn.Sequential(
+            nn.Conv2d(num_inputs, hidden_channels, 3, padding=1, bias=False),
+            nn.BatchNorm2d(hidden_channels),
+            nn.SiLU(),
+            nn.Conv2d(hidden_channels, hidden_channels, 3, padding=1, bias=False),
+            nn.BatchNorm2d(hidden_channels),
+            nn.SiLU(),
+        )
+
+        self.fusion = nn.Sequential(
+            nn.Conv2d(fused_channels + hidden_channels, fused_channels, 1, bias=False),
+            nn.BatchNorm2d(fused_channels),
+            nn.SiLU(),
+        )
+
+        # Residual gate, initialized to a small positive value so the module
+        # starts close to the identity mapping.
+        self.gamma = nn.Parameter(torch.tensor(0.01))
+
+    @staticmethod
+    def _gradient_magnitude(x: torch.Tensor) -> torch.Tensor:
+        """Return per-channel Sobel gradient magnitude of an NCHW tensor."""
+        sobel_x = torch.tensor([[1.0, 0.0, -1.0], [2.0, 0.0, -2.0], [1.0, 0.0, -1.0]],
+                                 device=x.device, dtype=x.dtype).view(1, 1, 3, 3)
+        sobel_y = torch.tensor([[1.0, 2.0, 1.0], [0.0, 0.0, 0.0], [-1.0, -2.0, -1.0]],
+                                 device=x.device, dtype=x.dtype).view(1, 1, 3, 3)
+        padding = 1
+        channels = x.shape[1]
+        sobel_x = sobel_x.repeat(channels, 1, 1, 1)
+        sobel_y = sobel_y.repeat(channels, 1, 1, 1)
+        gx = F.conv2d(x, sobel_x, padding=padding, groups=channels)
+        gy = F.conv2d(x, sobel_y, padding=padding, groups=channels)
+        return torch.sqrt(F.relu(gx * gx + gy * gy) + 1e-6)
+
+    @staticmethod
+    def _local_contrast(x: torch.Tensor, kernel_size: int = 5) -> torch.Tensor:
+        """Return per-channel local standard deviation as a contrast proxy."""
+        padding = kernel_size // 2
+        channels = x.shape[1]
+        kernel = torch.ones((channels, 1, kernel_size, kernel_size),
+                            device=x.device, dtype=x.dtype) / (kernel_size * kernel_size)
+        mean = F.conv2d(x, kernel, padding=padding, groups=channels)
+        mean_sq = F.conv2d(x * x, kernel, padding=padding, groups=channels)
+        return torch.sqrt(F.relu(mean_sq - mean * mean) + 1e-6)
+
+    def forward(self, fused: torch.Tensor, x_rgb: torch.Tensor, x_ir: torch.Tensor) -> torch.Tensor:
+        """Apply physical guidance to fused features.
+
+        Args:
+            fused: Fused feature map (B, fused_channels, Hf, Wf).
+            x_rgb: RGB input image (B, 3, H, W).
+            x_ir: IR input image (B, 3, H, W).
+
+        Returns:
+            Enhanced fused feature map with the same shape as `fused`.
+        """
+        # Compute physical maps in full precision to avoid AMP sqrt instabilities.
+        dtype = fused.dtype
+        x_rgb = x_rgb.float()
+        x_ir = x_ir.float()
+
+        # Compute multi-channel physical maps at the original image resolution.
+        rgb_grad = self._gradient_magnitude(x_rgb).mean(dim=1, keepdim=True)
+        ir_grad = self._gradient_magnitude(x_ir).mean(dim=1, keepdim=True)
+        rgb_contrast = self._local_contrast(x_rgb.mean(dim=1, keepdim=True))
+        ir_contrast = self._local_contrast(x_ir.mean(dim=1, keepdim=True))
+        cross_consistency = torch.minimum(rgb_grad, ir_grad)
+        cross_discrepancy = torch.abs(rgb_grad - ir_grad)
+
+        physical = torch.cat([rgb_grad, ir_grad, rgb_contrast, ir_contrast,
+                              cross_consistency, cross_discrepancy], dim=1)
+
+        # Resize physical maps to match the fused feature resolution.
+        physical = F.interpolate(physical, size=fused.shape[2:], mode="bilinear", align_corners=False)
+        physical = self.phys_encoder(physical.to(dtype))
+
+        # Fuse and apply a gated residual.
+        out = self.fusion(torch.cat([fused, physical], dim=1))
+        return fused + self.gamma * out
+
+
 class DMGFusion(nn.Module):
     """Differential Modality-Guided Fusion for P2 RGB-IR streams (ADR-001 §6, Exp-7).
 

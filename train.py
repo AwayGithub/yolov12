@@ -9,6 +9,13 @@ from ultralytics.utils import yaml_load, yaml_save
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument(
+        "--data",
+        type=str,
+        default="ultralytics/cfg/datasets/RGBT-3M.yaml",
+        metavar="YAML",
+        help="数据集 YAML 路径，默认使用 RGBT-3M 三分类配置",
+    )
+    parser.add_argument(
         "--data_root",
         type=str,
         default=None,
@@ -45,6 +52,8 @@ def parse_args():
     parser.add_argument("--device", type=str, default="0", help="训练设备，例如 0、1 或 cpu")
     parser.add_argument("--name", type=str, default=None, help="显式指定 runs/detect 下的实验目录名")
     parser.add_argument("--save_period", type=int, default=-1, help="每隔N个epoch保存checkpoint；小于1时关闭")
+    parser.add_argument("--cls", type=float, default=0.5, help="分类损失权重，默认 0.5")
+    parser.add_argument("--no_amp", action="store_true", help="关闭 AMP 混合精度训练")
     parser.add_argument(
         "--resume",
         type=str,
@@ -203,7 +212,7 @@ def _print_cross_scale(trainer):
 
 if __name__ == "__main__":
     args = parse_args()
-    data_cfg = yaml_load("ultralytics/cfg/datasets/RGBT-3M.yaml")
+    data_cfg = yaml_load(args.data)
     data_cfg["input_mode"] = args.input_mode
     if args.data_root:
         data_root = Path(args.data_root).expanduser().resolve()
@@ -323,7 +332,9 @@ if __name__ == "__main__":
         warmup_epochs=3.0,
         warmup_momentum=0.8,
         warmup_bias_lr=0.0,
+        cls=args.cls,
         cos_lr=False,
         val_period=2,
+        amp=not args.no_amp,
         save_period=args.save_period,
     )

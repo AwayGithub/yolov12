@@ -1,0 +1,20 @@
+# Local validation/train config for RGBT-3M dual-input fire/person setup
+
+name: RGBT-3M
+path: /data/xwh/dataset/RGBT-3M/RGBT-3M
+
+train: train.txt
+val: val.txt
+
+nc: 2
+names:
+  0: fire
+  1: person
+
+input_channels: 6
+input_mode: dual_input
+rgb_dir: RGB
+thermal_dir: IR
+label_dir: labels_fire_person
+img_size: [480, 640]
+format: yolo

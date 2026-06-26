@@ -713,7 +713,16 @@ class FLAME2Dataset(BaseDataset):
             cls = int(parts[0])
             bbox = np.array(parts[1:5], dtype=np.float32)
             labels.append([cls, *bbox])
-        return np.array(labels, dtype=np.float32).reshape(-1, 5)
+        labels = np.array(labels, dtype=np.float32).reshape(-1, 5)
+        if len(labels):
+            finite = np.isfinite(labels).all(axis=1)
+            in_range = (labels[:, 1:5] >= 0).all(axis=1) & (labels[:, 1:5] <= 1).all(axis=1)
+            positive_wh = (labels[:, 3] > 0) & (labels[:, 4] > 0)
+            labels = labels[finite & in_range & positive_wh]
+            if len(labels):
+                _, unique_idx = np.unique(labels, axis=0, return_index=True)
+                labels = labels[np.sort(unique_idx)]
+        return labels
 
     def cache_labels(self, path=Path("./labels.cache")):
         """

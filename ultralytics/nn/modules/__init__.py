@@ -67,6 +67,7 @@ from .block import (
     M2DLocalIlluminationFusion,
     M2DLocalIlluminationGate,
     FreDFTFusion,
+    PhysicalGuidance,
 )
 from .conv import (
     CBAM,
@@ -180,4 +181,5 @@ __all__ = (
     "M2DLocalIlluminationFusion",
     "M2DLocalIlluminationGate",
     "FreDFTFusion",
+    "PhysicalGuidance",
 )

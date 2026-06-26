@@ -1,0 +1,20 @@
+# Ultralytics YOLO RGBT-3M dual-input fire/person configuration
+
+name: RGBT-3M
+path: e:\Yan-Unifiles\lab\exp\yolov12\RGBT-3M
+
+train: train.txt
+val: val.txt
+
+nc: 2
+names:
+  0: fire
+  1: person
+
+input_channels: 6
+input_mode: dual_input
+rgb_dir: RGB
+thermal_dir: IR
+label_dir: labels_fire_person
+img_size: [480, 640]
+format: yolo

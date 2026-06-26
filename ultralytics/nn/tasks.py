@@ -72,6 +72,7 @@ from ultralytics.nn.modules import (
     M2DLocalIlluminationFusion,
     M2DLocalIlluminationGate,
     FreDFTFusion,
+    PhysicalGuidance,
 )
 from ultralytics.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, colorstr, emojis, yaml_load
 from ultralytics.utils.checks import check_requirements, check_suffix, check_yaml
@@ -663,6 +664,25 @@ class DualStreamDetectionModel(DetectionModel):
             else:
                 self.fusion_convs[stage_name] = Conv(c_out * 2, c_out, 1, 1)
 
+        # Optional physical guidance modules for ADR-004 C1.
+        _physical_guidance_stages = self.yaml.get("physical_guidance_stages", [])
+        if isinstance(_physical_guidance_stages, str):
+            _physical_guidance_stages = [s.strip() for s in _physical_guidance_stages.split(",") if s.strip()]
+        self.physical_guidance_stages = set(_physical_guidance_stages)
+        unknown_guidance_stages = self.physical_guidance_stages - set(self.FUSION_LAYER_INDICES)
+        if unknown_guidance_stages:
+            raise ValueError(
+                f"physical_guidance_stages contains unsupported stages: {sorted(unknown_guidance_stages)}. "
+                f"Supported values: {sorted(self.FUSION_LAYER_INDICES)}."
+            )
+        self.physical_guidance = nn.ModuleDict()
+        for stage_name in sorted(self.physical_guidance_stages):
+            c_out = self._get_layer_out_channels(self.backbone_rgb[self.FUSION_LAYER_INDICES[stage_name]])
+            self.physical_guidance[stage_name] = PhysicalGuidance(
+                fused_channels=c_out,
+                hidden_channels=int(self.yaml.get("physical_guidance_hidden", 32)),
+            )
+
         c_p3 = self._get_layer_out_channels(self.backbone_rgb[self.FUSION_LAYER_INDICES["p3"]])
         self.aux_head_rgb = Detect(nc=self.yaml["nc"], ch=[c_p3])
         self.aux_head_ir = Detect(nc=self.yaml["nc"], ch=[c_p3])
@@ -803,6 +823,8 @@ class DualStreamDetectionModel(DetectionModel):
                 fused[stage_name] = fc(r, i)
             else:
                 fused[stage_name] = fc(torch.cat([r, i], dim=1))
+            if stage_name in self.physical_guidance_stages:
+                fused[stage_name] = self.physical_guidance[stage_name](fused[stage_name], x_rgb, x_ir)
 
         # 构造 y 列表供 head 使用跳连索引
         y = [None] * (max(self.FUSION_LAYER_INDICES.values()) + 1)
