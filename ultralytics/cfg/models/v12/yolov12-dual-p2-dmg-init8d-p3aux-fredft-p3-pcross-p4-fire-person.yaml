@@ -1,8 +1,8 @@
-# YOLOv12 dual-stream B9: B8 + P4 self/cross two-stage feature concat
-# Base: P3 aux + P2 DMGFusion Init8d (alpha=1.0, beta=-0.1) + FreDFT at P3.
-# Innovation delta: concat input, mid-stage, and final self/cross features before a 3C-to-C projection.
+# YOLOv12 dual-stream B2: A1 + Parallel Cross A2C2f@P4 for fire/person binary.
+# Base: P3 aux + P2 DMGFusion Init8d (alpha=1.0, beta=-0.1) + FreDFT@P3.
+# Innovation delta: replace backbone P4 A2C2f with parallel self/cross A2C2f (mlp_ratio=2.0).
 
-nc: 3
+nc: 2
 ch: 6
 dual_stream: true
 
@@ -17,11 +17,6 @@ fredft_checkpoint_ffn: true
 parallel_cross_a2c2f_stages: [p4]
 parallel_cross_gamma_init: 0.01
 parallel_cross_mlp_ratio: 2.0
-parallel_cross_self_depth: 4
-parallel_cross_cross_depth: 4
-parallel_cross_stage_concat: true
-parallel_cross_mid_rgb_scale_init: 1.0
-parallel_cross_mid_ir_scale_init: 1.0
 
 scales:
   n: [0.50, 0.25, 1024]

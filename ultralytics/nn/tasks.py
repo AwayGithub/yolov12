@@ -69,6 +69,7 @@ from ultralytics.nn.modules import (
     DMGFusionPosAlpha,
     DMGFusionInit8d,
     DualParallelCrossA2C2f,
+    DualParallelCrossC3k2,
     M2DLocalIlluminationFusion,
     M2DLocalIlluminationGate,
     FreDFTFusion,
@@ -504,7 +505,8 @@ class DualStreamDetectionModel(DetectionModel):
     """双分支 RGB-IR 中期融合检测模型。
 
     两个独立 backbone 分别处理 RGB 和 IR（各 3 通道），在 P3/P4/P5 concat + 1×1 conv 融合后送入共享 neck+head。
-    P2 仅保留 plain / DMG 系列融合方式，不再支持 CMG、CMA、BidirLiCMA。
+    P2 fusion 仅保留 plain / DMG 系列；ParallelCross 可替换 P2/P3/P4/P5 backbone 模块，后续仍按
+    对应 stage 的 fusion_convs 融合。
     """
 
     FUSION_LAYER_INDICES = {"p2": 2, "p3": 4, "p4": 6, "p5": 8}
@@ -533,18 +535,47 @@ class DualStreamDetectionModel(DetectionModel):
                 f"p2_fusion '{_p2_fusion_mode}' is not supported. "
                 "Supported values: plain, dmg, dmg_posalpha, dmg_init8d."
             )
+        _dmg_fusion_mode = self.yaml.get("dmg_fusion_mode", _p2_fusion_mode)
+        if _dmg_fusion_mode not in {"plain", "dmg", "dmg_posalpha", "dmg_init8d"}:
+            raise ValueError(
+                f"dmg_fusion_mode '{_dmg_fusion_mode}' is not supported. "
+                "Supported values: plain, dmg, dmg_posalpha, dmg_init8d."
+            )
+        _dmg_stages = self.yaml.get("dmg_fusion_stages", [])
+        if isinstance(_dmg_stages, str):
+            _dmg_stages = [s.strip() for s in _dmg_stages.split(",") if s.strip()]
+        _dmg_stages = list(_dmg_stages)
+        if _p2_fusion_mode in {"dmg", "dmg_posalpha", "dmg_init8d"} and "p2" not in _dmg_stages:
+            _dmg_stages.append("p2")
+        if _dmg_stages and _dmg_fusion_mode == "plain":
+            raise ValueError("dmg_fusion_stages requires dmg_fusion_mode to be dmg, dmg_posalpha, or dmg_init8d.")
+        _valid_dmg_stages = set(self.FUSION_LAYER_INDICES)
+        _unknown_dmg_stages = set(_dmg_stages) - _valid_dmg_stages
+        if _unknown_dmg_stages:
+            raise ValueError(
+                f"dmg_fusion_stages contains unsupported stages: {sorted(_unknown_dmg_stages)}. "
+                f"Supported values: {sorted(_valid_dmg_stages)}."
+            )
+        self.dmg_fusion_stages = set(_dmg_stages)
+
         _freq_stages = self.yaml.get("freq_fusion_stages", [])
         if isinstance(_freq_stages, str):
             _freq_stages = [s.strip() for s in _freq_stages.split(",") if s.strip()]
         _freq_stages = list(_freq_stages)
-        _valid_freq_stages = {"p3", "p4", "p5"}
+        _valid_freq_stages = set(self.FUSION_LAYER_INDICES)
         _unknown_freq_stages = set(_freq_stages) - _valid_freq_stages
         if _unknown_freq_stages:
             raise ValueError(
                 f"freq_fusion_stages contains unsupported stages: {sorted(_unknown_freq_stages)}. "
-                "Supported values: p3, p4, p5."
+                f"Supported values: {sorted(_valid_freq_stages)}."
             )
         self.freq_fusion_stages = set(_freq_stages)
+        _overlapped_stages = self.dmg_fusion_stages & self.freq_fusion_stages
+        if _overlapped_stages:
+            raise ValueError(
+                f"dmg_fusion_stages and freq_fusion_stages overlap at {sorted(_overlapped_stages)}. "
+                "Use one fusion innovation per stage."
+            )
 
         _lif_stages = self.yaml.get("lif_fusion_stages", [])
         if isinstance(_lif_stages, str):
@@ -557,10 +588,10 @@ class DualStreamDetectionModel(DetectionModel):
                 f"lif_fusion_stages contains unsupported stages: {sorted(_unknown_lif_stages)}. "
                 "Supported values: p3, p4, p5."
             )
-        _overlapped_stages = set(_lif_stages) & self.freq_fusion_stages
+        _overlapped_stages = set(_lif_stages) & (self.freq_fusion_stages | self.dmg_fusion_stages)
         if _overlapped_stages:
             raise ValueError(
-                f"lif_fusion_stages and freq_fusion_stages overlap at {sorted(_overlapped_stages)}. "
+                f"lif_fusion_stages overlaps with another fusion innovation at {sorted(_overlapped_stages)}. "
                 "Use one fusion innovation per stage."
             )
         self.lif_fusion_stages = set(_lif_stages)
@@ -570,14 +601,16 @@ class DualStreamDetectionModel(DetectionModel):
         if isinstance(_parallel_cross_stages, str):
             _parallel_cross_stages = [s.strip() for s in _parallel_cross_stages.split(",") if s.strip()]
         _parallel_cross_stages = list(_parallel_cross_stages)
-        _valid_parallel_cross_stages = {"p4", "p5"}
+        _valid_parallel_cross_stages = {"p2", "p3", "p4", "p5"}
         _unknown_parallel_cross_stages = set(_parallel_cross_stages) - _valid_parallel_cross_stages
         if _unknown_parallel_cross_stages:
             raise ValueError(
                 "parallel_cross_a2c2f_stages contains unsupported stages: "
-                f"{sorted(_unknown_parallel_cross_stages)}. Supported values: p4, p5."
+                f"{sorted(_unknown_parallel_cross_stages)}. Supported values: {sorted(_valid_parallel_cross_stages)}."
             )
-        _overlapped_stages = set(_parallel_cross_stages) & (self.freq_fusion_stages | self.lif_fusion_stages)
+        _overlapped_stages = set(_parallel_cross_stages) & (
+            self.dmg_fusion_stages | self.freq_fusion_stages | self.lif_fusion_stages
+        )
         if _overlapped_stages:
             raise ValueError(
                 "parallel_cross_a2c2f_stages overlaps with another fusion innovation at "
@@ -588,37 +621,54 @@ class DualStreamDetectionModel(DetectionModel):
         for stage_name in self.parallel_cross_a2c2f_stages:
             layer_idx = self.FUSION_LAYER_INDICES[stage_name]
             old_layer = self.backbone_rgb[layer_idx]
-            if not isinstance(old_layer, A2C2f):
+            if isinstance(old_layer, A2C2f):
+                c1 = old_layer.cv1.conv.in_channels
+                c2 = old_layer.cv2.conv.out_channels
+                c_hidden = old_layer.cv1.conv.out_channels
+                n = len(old_layer.m)
+                area = old_layer.m[0][0].attn.area
+                mlp_ratio = old_layer.m[0][0].mlp[0].conv.out_channels / c_hidden
+                new_layer = DualParallelCrossA2C2f(
+                    c1,
+                    c2,
+                    n=n,
+                    self_depth=self.yaml.get("parallel_cross_self_depth"),
+                    cross_depth=self.yaml.get("parallel_cross_cross_depth"),
+                    stage_concat=bool(self.yaml.get("parallel_cross_stage_concat", False)),
+                    cross_mid_scale_rgb_init=float(self.yaml.get("parallel_cross_mid_rgb_scale_init", 1.0)),
+                    cross_mid_scale_ir_init=float(self.yaml.get("parallel_cross_mid_ir_scale_init", 1.0)),
+                    area=area,
+                    mlp_ratio=mlp_ratio,
+                    cross_mlp_ratio=float(self.yaml.get("parallel_cross_mlp_ratio", mlp_ratio)),
+                    cross_scale_rgb_init=float(self.yaml.get("parallel_cross_rgb_scale_init", 1.0)),
+                    cross_scale_ir_init=float(self.yaml.get("parallel_cross_ir_scale_init", 1.0)),
+                    learnable_cross_scale=bool(self.yaml.get("parallel_cross_learnable_scale", True)),
+                    cross_drop_path=float(self.yaml.get("parallel_cross_drop_path", 0.0)),
+                    gamma_mode=str(self.yaml.get("parallel_cross_gamma_mode", "free")),
+                    gamma_max=float(self.yaml.get("parallel_cross_gamma_max", 0.35)),
+                    scale_init=float(self.yaml.get("parallel_cross_gamma_init", 0.01)),
+                )
+            elif isinstance(old_layer, C3k2):
+                c1 = old_layer.cv1.conv.in_channels
+                c2 = old_layer.cv2.conv.out_channels
+                n = len(old_layer.m)
+                new_layer = DualParallelCrossC3k2(
+                    c1,
+                    c2,
+                    n=n,
+                    area=int(self.yaml.get("parallel_cross_area", 4)),
+                    mlp_ratio=float(self.yaml.get("parallel_cross_mlp_ratio", 2.0)),
+                    cross_mlp_ratio=float(self.yaml.get("parallel_cross_mlp_ratio", 2.0)),
+                    cross_scale_rgb_init=float(self.yaml.get("parallel_cross_rgb_scale_init", 1.0)),
+                    cross_scale_ir_init=float(self.yaml.get("parallel_cross_ir_scale_init", 1.0)),
+                    scale_init=float(self.yaml.get("parallel_cross_gamma_init", 0.01)),
+                    checkpoint_blocks=bool(self.yaml.get("parallel_cross_checkpoint", False)),
+                )
+            else:
                 raise ValueError(
-                    f"parallel_cross_a2c2f_stages requires A2C2f at {stage_name}, "
+                    f"parallel_cross_a2c2f_stages requires A2C2f or C3k2 at {stage_name}, "
                     f"got {type(old_layer).__name__}."
                 )
-            c1 = old_layer.cv1.conv.in_channels
-            c2 = old_layer.cv2.conv.out_channels
-            c_hidden = old_layer.cv1.conv.out_channels
-            n = len(old_layer.m)
-            area = old_layer.m[0][0].attn.area
-            mlp_ratio = old_layer.m[0][0].mlp[0].conv.out_channels / c_hidden
-            new_layer = DualParallelCrossA2C2f(
-                c1,
-                c2,
-                n=n,
-                self_depth=self.yaml.get("parallel_cross_self_depth"),
-                cross_depth=self.yaml.get("parallel_cross_cross_depth"),
-                stage_concat=bool(self.yaml.get("parallel_cross_stage_concat", False)),
-                cross_mid_scale_rgb_init=float(self.yaml.get("parallel_cross_mid_rgb_scale_init", 1.0)),
-                cross_mid_scale_ir_init=float(self.yaml.get("parallel_cross_mid_ir_scale_init", 1.0)),
-                area=area,
-                mlp_ratio=mlp_ratio,
-                cross_mlp_ratio=float(self.yaml.get("parallel_cross_mlp_ratio", mlp_ratio)),
-                cross_scale_rgb_init=float(self.yaml.get("parallel_cross_rgb_scale_init", 1.0)),
-                cross_scale_ir_init=float(self.yaml.get("parallel_cross_ir_scale_init", 1.0)),
-                learnable_cross_scale=bool(self.yaml.get("parallel_cross_learnable_scale", True)),
-                cross_drop_path=float(self.yaml.get("parallel_cross_drop_path", 0.0)),
-                gamma_mode=str(self.yaml.get("parallel_cross_gamma_mode", "free")),
-                gamma_max=float(self.yaml.get("parallel_cross_gamma_max", 0.35)),
-                scale_init=float(self.yaml.get("parallel_cross_gamma_init", 0.01)),
-            )
             new_layer.i = old_layer.i
             new_layer.f = old_layer.f
             new_layer.type = f"{DualParallelCrossA2C2f.__module__}.{DualParallelCrossA2C2f.__name__}"
@@ -644,9 +694,9 @@ class DualStreamDetectionModel(DetectionModel):
                     scale=float(self.yaml.get("lif_scale", 0.63)),
                     max_step=float(self.yaml.get("lif_max_step", 0.5)),
                 )
-            elif stage_name == "p2" and _p2_fusion_mode == "dmg":
+            elif stage_name in self.dmg_fusion_stages and _dmg_fusion_mode == "dmg":
                 self.fusion_convs[stage_name] = DMGFusion(c_out)
-            elif stage_name == "p2" and _p2_fusion_mode == "dmg_posalpha":
+            elif stage_name in self.dmg_fusion_stages and _dmg_fusion_mode == "dmg_posalpha":
                 self.fusion_convs[stage_name] = DMGFusionPosAlpha(
                     c_out,
                     diff_hidden_ratio=float(self.yaml.get("dmg_diff_hidden_ratio", 0.25)),
@@ -654,7 +704,7 @@ class DualStreamDetectionModel(DetectionModel):
                     alpha_init=float(self.yaml.get("dmg_alpha_init", 1.0)),
                     beta_init=float(self.yaml.get("dmg_beta_init", 1.0)),
                 )
-            elif stage_name == "p2" and _p2_fusion_mode == "dmg_init8d":
+            elif stage_name in self.dmg_fusion_stages and _dmg_fusion_mode == "dmg_init8d":
                 self.fusion_convs[stage_name] = DMGFusionInit8d(
                     c_out,
                     diff_hidden_ratio=float(self.yaml.get("dmg_diff_hidden_ratio", 0.25)),

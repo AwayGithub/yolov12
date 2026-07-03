@@ -1,16 +1,13 @@
-# YOLOv12 dual-stream P2 DMG follow-up E1
-# DMG-PosAlpha: keep DMGFusion v1 formula, but constrain alpha to [0, alpha_max].
-# Backbone target: P4 A2C2f + default P3 aux head.
+# YOLOv12 dual-stream D2.1 binary: DMG-Init8d@P2 + P3 aux for fire/person.
 
-nc: 3
+nc: 2
 ch: 6
 dual_stream: true
 
-p2_fusion: dmg_posalpha
+p2_fusion: dmg_init8d
 dmg_diff_hidden_ratio: 0.25
-dmg_alpha_max: 3.0
 dmg_alpha_init: 1.0
-dmg_beta_init: 1.0
+dmg_beta_init: -0.1
 
 scales:
   n: [0.50, 0.25, 1024]

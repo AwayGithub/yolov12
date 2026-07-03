@@ -1,15 +1,14 @@
-# YOLOv12 dual-stream P2 DMG follow-up D2.2
-# DMG-Init8d: keep DMGFusion v1 formula, but start from a stronger differential-amplifier state.
-# Backbone target: P4 A2C2f + default P3 aux head.
+# P234 homogeneous ablation: FreDFTFusion at P2/P3/P4 for fire/person binary.
 
-nc: 3
+nc: 2
 ch: 6
 dual_stream: true
 
-p2_fusion: dmg_init8d
-dmg_diff_hidden_ratio: 0.25
-dmg_alpha_init: 1.5
-dmg_beta_init: -0.15
+p2_fusion: plain
+freq_fusion_stages: [p2, p3, p4]
+fredft_expansion: 3.0
+fredft_qkv_expand: 1.0
+fredft_checkpoint_ffn: true
 
 scales:
   n: [0.50, 0.25, 1024]
@@ -30,25 +29,19 @@ head:
   - [-1, 1, nn.Upsample, [None, 2, "nearest"]]
   - [[-1, 6], 1, Concat, [1]]
   - [-1, 2, A2C2f, [512, False, -1]]
-
   - [-1, 1, nn.Upsample, [None, 2, "nearest"]]
   - [[-1, 4], 1, Concat, [1]]
   - [-1, 2, A2C2f, [256, False, -1]]
-
   - [-1, 1, nn.Upsample, [None, 2, "nearest"]]
   - [[-1, 2], 1, Concat, [1]]
   - [-1, 2, C3k2, [128, False, 0.25]]
-
   - [-1, 1, Conv, [128, 3, 2]]
   - [[-1, 14], 1, Concat, [1]]
   - [-1, 2, A2C2f, [256, False, -1]]
-
   - [-1, 1, Conv, [256, 3, 2]]
   - [[-1, 11], 1, Concat, [1]]
   - [-1, 2, A2C2f, [512, False, -1]]
-
   - [-1, 1, Conv, [512, 3, 2]]
   - [[-1, 8], 1, Concat, [1]]
   - [-1, 2, C3k2, [1024, True]]
-
   - [[17, 20, 23, 26], 1, Detect, [nc]]

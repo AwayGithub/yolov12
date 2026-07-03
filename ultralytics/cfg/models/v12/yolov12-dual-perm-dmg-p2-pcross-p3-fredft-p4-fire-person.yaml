@@ -1,10 +1,22 @@
-# YOLOv12 dual-stream F2 binary: plainP2 + A2C2f@P4 + P3 aux for fire/person.
+# Perm-B: DMGInit8d@P2 + Parallel Cross@P3 + FreDFT@P4 for layer-mechanism mismatch study.
 
 nc: 2
 ch: 6
 dual_stream: true
 
-p2_fusion: plain
+p2_fusion: dmg_init8d
+dmg_diff_hidden_ratio: 0.25
+dmg_alpha_init: 1.0
+dmg_beta_init: -0.1
+freq_fusion_stages: [p4]
+fredft_expansion: 3.0
+fredft_qkv_expand: 1.0
+fredft_checkpoint_ffn: true
+parallel_cross_a2c2f_stages: [p3]
+parallel_cross_area: 4
+parallel_cross_gamma_init: 0.01
+parallel_cross_mlp_ratio: 2.0
+parallel_cross_checkpoint: true
 
 scales:
   n: [0.50, 0.25, 1024]
@@ -25,25 +37,19 @@ head:
   - [-1, 1, nn.Upsample, [None, 2, "nearest"]]
   - [[-1, 6], 1, Concat, [1]]
   - [-1, 2, A2C2f, [512, False, -1]]
-
   - [-1, 1, nn.Upsample, [None, 2, "nearest"]]
   - [[-1, 4], 1, Concat, [1]]
   - [-1, 2, A2C2f, [256, False, -1]]
-
   - [-1, 1, nn.Upsample, [None, 2, "nearest"]]
   - [[-1, 2], 1, Concat, [1]]
   - [-1, 2, C3k2, [128, False, 0.25]]
-
   - [-1, 1, Conv, [128, 3, 2]]
   - [[-1, 14], 1, Concat, [1]]
   - [-1, 2, A2C2f, [256, False, -1]]
-
   - [-1, 1, Conv, [256, 3, 2]]
   - [[-1, 11], 1, Concat, [1]]
   - [-1, 2, A2C2f, [512, False, -1]]
-
   - [-1, 1, Conv, [512, 3, 2]]
   - [[-1, 8], 1, Concat, [1]]
   - [-1, 2, C3k2, [1024, True]]
-
   - [[17, 20, 23, 26], 1, Detect, [nc]]

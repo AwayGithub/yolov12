@@ -53,6 +53,7 @@ def parse_args():
     parser.add_argument("--name", type=str, default=None, help="显式指定 runs/detect 下的实验目录名")
     parser.add_argument("--save_period", type=int, default=-1, help="每隔N个epoch保存checkpoint；小于1时关闭")
     parser.add_argument("--cls", type=float, default=0.5, help="分类损失权重，默认 0.5")
+    parser.add_argument("--batch", type=int, default=16, help="训练 batch size，默认 16")
     parser.add_argument("--no_amp", action="store_true", help="关闭 AMP 混合精度训练")
     parser.add_argument(
         "--resume",
@@ -318,7 +319,7 @@ if __name__ == "__main__":
         resume=bool(args.resume),
         epochs=args.epochs if args.epochs is not None else 200,
         imgsz=[480, 640],  # 输入模型的尺寸，也是验证的尺寸
-        batch=16,
+        batch=args.batch,
         workers=0,
         device=args.device,
         name=args.name,

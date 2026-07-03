@@ -62,6 +62,7 @@ __all__ = (
     "CrossAAttn",
     "CrossABlock",
     "DualParallelCrossA2C2f",
+    "DualParallelCrossC3k2",
 )
 
 logger = logging.getLogger(__name__)
@@ -1634,6 +1635,88 @@ class DualParallelCrossA2C2f(nn.Module):
         return x_rgb + self.effective_gamma_rgb() * rgb_delta, x_ir + self.effective_gamma_ir() * ir_delta
 
 
+class DualParallelCrossC3k2(nn.Module):
+    """Dual-stream C3k2 replacement with parallel self and fixed-guide cross branches."""
+
+    def __init__(
+        self,
+        c1,
+        c2,
+        n=1,
+        area=4,
+        mlp_ratio=2.0,
+        cross_mlp_ratio=2.0,
+        cross_scale_rgb_init=1.0,
+        cross_scale_ir_init=1.0,
+        scale_init=0.01,
+        checkpoint_blocks=False,
+    ):
+        """Initialize a P2/P3 C3k2 replacement that preserves two backbone streams."""
+        super().__init__()
+        if c2 % 2:
+            raise ValueError(f"DualParallelCrossC3k2 output channels must be even, got {c2}.")
+        self.c_branch = c2 // 2
+        assert self.c_branch % 32 == 0, "Dimension of CrossABlock must be a multiple of 32."
+        num_heads = self.c_branch // 32
+        n = max(1, int(n))
+
+        self.cv1_rgb = Conv(c1, c2, 1, 1)
+        self.cv1_ir = Conv(c1, c2, 1, 1)
+        self.self_rgb = nn.ModuleList(ABlock(self.c_branch, num_heads, mlp_ratio, area) for _ in range(n))
+        self.self_ir = nn.ModuleList(ABlock(self.c_branch, num_heads, mlp_ratio, area) for _ in range(n))
+        self.cross_rgb = nn.ModuleList(CrossABlock(self.c_branch, num_heads, cross_mlp_ratio, area) for _ in range(n))
+        self.cross_ir = nn.ModuleList(CrossABlock(self.c_branch, num_heads, cross_mlp_ratio, area) for _ in range(n))
+        self.cv2_rgb = Conv(c2 * 2, c2, 1)
+        self.cv2_ir = Conv(c2 * 2, c2, 1)
+        self.gamma_rgb = nn.Parameter(torch.tensor(float(scale_init)))
+        self.gamma_ir = nn.Parameter(torch.tensor(float(scale_init)))
+        self.cross_scale_rgb = nn.Parameter(torch.tensor(float(cross_scale_rgb_init)))
+        self.cross_scale_ir = nn.Parameter(torch.tensor(float(cross_scale_ir_init)))
+        self.gamma_mode = "free"
+        self.checkpoint_blocks = bool(checkpoint_blocks)
+
+    def effective_gamma_rgb(self):
+        """Return the effective RGB residual scale."""
+        return self.gamma_rgb
+
+    def effective_gamma_ir(self):
+        """Return the effective IR residual scale."""
+        return self.gamma_ir
+
+    def forward(self, x_rgb, x_ir):
+        """Run self and cross branches at a C3k2 stage and return updated two-stream features."""
+        z_rgb = self.cv1_rgb(x_rgb)
+        z_ir = self.cv1_ir(x_ir)
+        rgb_self_in, rgb_cross_in = z_rgb.chunk(2, dim=1)
+        ir_self_in, ir_cross_in = z_ir.chunk(2, dim=1)
+
+        rgb_self = rgb_self_in
+        ir_self = ir_self_in
+        for block in self.self_rgb:
+            rgb_self = self._run_block(block, rgb_self)
+        for block in self.self_ir:
+            ir_self = self._run_block(block, ir_self)
+
+        rgb_cross = rgb_cross_in
+        ir_cross = ir_cross_in
+        for block in self.cross_rgb:
+            rgb_cross = self._run_block(block, rgb_cross, ir_cross_in)
+        for block in self.cross_ir:
+            ir_cross = self._run_block(block, ir_cross, rgb_cross_in)
+        rgb_cross = rgb_cross_in + self.cross_scale_rgb * (rgb_cross - rgb_cross_in)
+        ir_cross = ir_cross_in + self.cross_scale_ir * (ir_cross - ir_cross_in)
+
+        rgb_delta = self.cv2_rgb(torch.cat((rgb_self_in, rgb_cross_in, rgb_self, rgb_cross), dim=1))
+        ir_delta = self.cv2_ir(torch.cat((ir_self_in, ir_cross_in, ir_self, ir_cross), dim=1))
+        return z_rgb + self.gamma_rgb * rgb_delta, z_ir + self.gamma_ir * ir_delta
+
+    def _run_block(self, block, *args):
+        """Run an attention block, optionally checkpointing activations during training."""
+        if self.checkpoint_blocks and self.training and torch.is_grad_enabled() and any(x.requires_grad for x in args):
+            return checkpoint(block, *args, use_reentrant=False)
+        return block(*args)
+
+
 class PhysicalGuidance(nn.Module):
     """Lightweight physical guidance module for ADR-004 C1.
 
@@ -1947,7 +2030,10 @@ class _FreDFTLayerNorm2d(nn.Module):
 
     def forward(self, x):
         """Normalize a BCHW tensor over C at each HxW location."""
-        return self.norm(x.permute(0, 2, 3, 1)).permute(0, 3, 1, 2).contiguous()
+        x = x.permute(0, 2, 3, 1)
+        weight = self.norm.weight.to(dtype=x.dtype) if self.norm.weight is not None else None
+        bias = self.norm.bias.to(dtype=x.dtype) if self.norm.bias is not None else None
+        return F.layer_norm(x, self.norm.normalized_shape, weight, bias, self.norm.eps).permute(0, 3, 1, 2).contiguous()
 
 
 class _FreDFTFeedForward(nn.Module):
@@ -2012,14 +2098,14 @@ class _FreDFTFrequencyAttention(nn.Module):
     def _frequency_gate(q, k):
         """Use elementwise FFT-domain multiplication as a global frequency response."""
         response = torch.fft.rfft2(q.float()) * torch.fft.rfft2(k.float())
-        return torch.fft.irfft2(response, s=q.shape[-2:]).to(dtype=q.dtype)
+        return torch.fft.irfft2(response, s=q.shape[-2:])
 
     def forward(self, x_rgb, x_ir):
         """Return same-stream deltas modulated by cross-modal frequency responses."""
         rgb_q, rgb_k, rgb_v = self.to_hidden_dw(self.to_hidden(self.norm(x_rgb))).chunk(3, dim=1)
         ir_q, ir_k, ir_v = self.to_hidden_dw(self.to_hidden(self.norm(x_ir))).chunk(3, dim=1)
-        rgb_to_ir = self.freq_norm(self._frequency_gate(rgb_q, ir_k))
-        ir_to_rgb = self.freq_norm(self._frequency_gate(ir_q, rgb_k))
+        rgb_to_ir = self.freq_norm(self._frequency_gate(rgb_q, ir_k)).to(dtype=rgb_q.dtype)
+        ir_to_rgb = self.freq_norm(self._frequency_gate(ir_q, rgb_k)).to(dtype=ir_q.dtype)
         rgb_delta = self.project_out(rgb_v * ir_to_rgb)
         ir_delta = self.project_out(ir_v * rgb_to_ir)
         return rgb_delta, ir_delta

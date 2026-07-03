@@ -1,8 +1,8 @@
-# YOLOv12 dual-stream A1 + Parallel Cross A2C2f at P4 only
-# Base: P3 aux + P2 DMGFusion Init8d (alpha=1.0, beta=-0.1) + FreDFT at P3.
-# Innovation delta: replace backbone P4 A2C2f with parallel self/cross A2C2f using original softmax attention.
+# YOLOv12 dual-stream B1: A1 + Parallel Cross A2C2f@P4/P5 for fire/person binary.
+# Base: P3 aux + P2 DMGFusion Init8d (alpha=1.0, beta=-0.1) + FreDFT@P3.
+# Innovation delta: replace backbone P4/P5 A2C2f with parallel self/cross A2C2f (mlp_ratio=2.0).
 
-nc: 3
+nc: 2
 ch: 6
 dual_stream: true
 
@@ -14,13 +14,9 @@ freq_fusion_stages: [p3]
 fredft_expansion: 3.0
 fredft_qkv_expand: 1.0
 fredft_checkpoint_ffn: true
-parallel_cross_a2c2f_stages: [p4]
+parallel_cross_a2c2f_stages: [p4, p5]
 parallel_cross_gamma_init: 0.01
 parallel_cross_mlp_ratio: 2.0
-parallel_cross_learnable_scale: false
-parallel_cross_drop_path: 0.05
-parallel_cross_cross_lr_mult: 0.1
-parallel_cross_gamma_lr_mult: 0.1
 
 scales:
   n: [0.50, 0.25, 1024]
