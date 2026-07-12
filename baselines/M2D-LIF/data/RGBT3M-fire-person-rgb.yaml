@@ -1,0 +1,12 @@
+# RGBT-3M RGB-only fire/person dataset for mono-modal teacher training.
+
+path: /data/xwh/code/yolov12/baselines/M2D-LIF/datasets/RGBT3M_fp_rgb
+train: images/train
+val: images/val
+
+nc: 2
+ch: 3
+
+names:
+  0: fire
+  1: person

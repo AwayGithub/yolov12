@@ -1,0 +1,12 @@
+# One-sample smoke dataset for dual-input M2D-LIF training-path validation.
+
+path: /data/xwh/code/yolov12/baselines/M2D-LIF/datasets/RGBT3M_fp_dual_smoke
+train: images/train
+val: images/val
+
+nc: 2
+ch: 6
+
+names:
+  0: fire
+  1: person

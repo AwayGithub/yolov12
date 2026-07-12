@@ -1,0 +1,8 @@
+/data/xwh/code/yolov12/baselines/CALNet-Dronevehicle/data/RGBT-3M-fire-person/ir/train/images/video1_frame_00244.jpg
+/data/xwh/code/yolov12/baselines/CALNet-Dronevehicle/data/RGBT-3M-fire-person/ir/train/images/video1_frame_00246.jpg
+/data/xwh/code/yolov12/baselines/CALNet-Dronevehicle/data/RGBT-3M-fire-person/ir/train/images/video1_frame_00248.jpg
+/data/xwh/code/yolov12/baselines/CALNet-Dronevehicle/data/RGBT-3M-fire-person/ir/train/images/video1_frame_00250.jpg
+/data/xwh/code/yolov12/baselines/CALNet-Dronevehicle/data/RGBT-3M-fire-person/ir/train/images/video1_frame_00252.jpg
+/data/xwh/code/yolov12/baselines/CALNet-Dronevehicle/data/RGBT-3M-fire-person/ir/train/images/video1_frame_00260.jpg
+/data/xwh/code/yolov12/baselines/CALNet-Dronevehicle/data/RGBT-3M-fire-person/ir/train/images/video1_frame_00262.jpg
+/data/xwh/code/yolov12/baselines/CALNet-Dronevehicle/data/RGBT-3M-fire-person/ir/train/images/video1_frame_00264.jpg

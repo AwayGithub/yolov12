@@ -59,6 +59,9 @@ __all__ = (
     "M2DLocalIlluminationGate",
     "M2DLocalIlluminationFusion",
     "FreDFTFusion",
+    "CrossModalSemanticPrototypeAttention",
+    "StackedCrossModalSemanticPrototypeAttention",
+    "RedundancySuppressedSparseSemanticQueryFusion",
     "CrossAAttn",
     "CrossABlock",
     "DualParallelCrossA2C2f",
@@ -2156,3 +2159,322 @@ class FreDFTFusion(nn.Module):
         rgb = rgb_att + self._ffn_forward(self.norm_rgb(rgb_att))
         ir = ir_att + self._ffn_forward(self.norm_ir(ir_att))
         return self.relu(self.fuse(torch.cat([rgb, ir], dim=1)))
+
+
+class _CSPATokenAttention(nn.Module):
+    """Small token attention used by CSPA for prototype exchange and injection."""
+
+    def __init__(self, channels: int, num_heads: int = 4):
+        super().__init__()
+        if channels % num_heads != 0:
+            raise ValueError(f"channels ({channels}) must be divisible by num_heads ({num_heads}).")
+        self.num_heads = num_heads
+        self.head_dim = channels // num_heads
+        self.q_norm = nn.LayerNorm(channels)
+        self.kv_norm = nn.LayerNorm(channels)
+        self.q_proj = nn.Linear(channels, channels, bias=False)
+        self.k_proj = nn.Linear(channels, channels, bias=False)
+        self.v_proj = nn.Linear(channels, channels, bias=False)
+        self.out_proj = nn.Linear(channels, channels, bias=False)
+
+    def forward(self, q_in: torch.Tensor, kv_in: torch.Tensor) -> torch.Tensor:
+        """Attend from q_in to kv_in, both shaped [B, N, C]."""
+        bsz, q_len, channels = q_in.shape
+        kv_len = kv_in.shape[1]
+        q = self.q_proj(self.q_norm(q_in)).view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+        kv = self.kv_norm(kv_in)
+        k = self.k_proj(kv).view(bsz, kv_len, self.num_heads, self.head_dim).transpose(1, 2)
+        v = self.v_proj(kv).view(bsz, kv_len, self.num_heads, self.head_dim).transpose(1, 2)
+        out = F.scaled_dot_product_attention(q, k, v)
+        out = out.transpose(1, 2).reshape(bsz, q_len, channels)
+        return self.out_proj(out)
+
+
+class _CSPAPrototypeInjection(nn.Module):
+    """Inject enhanced semantic prototypes back into a spatial feature map."""
+
+    def __init__(self, channels: int, num_heads: int = 4):
+        super().__init__()
+        self.attn = _CSPATokenAttention(channels, num_heads=num_heads)
+
+    def forward(self, x: torch.Tensor, proto: torch.Tensor) -> torch.Tensor:
+        """Return prototype-conditioned context with the same BCHW shape as x."""
+        bsz, channels, height, width = x.shape
+        feat = x.flatten(2).transpose(1, 2)
+        ctx = self.attn(feat, proto)
+        return ctx.transpose(1, 2).reshape(bsz, channels, height, width)
+
+
+class _RSQFRedundancyGateLite(nn.Module):
+    """Predict a single-channel redundancy map for one modality."""
+
+    def __init__(self, channels: int):
+        super().__init__()
+        self.gate = nn.Sequential(
+            nn.Conv2d(channels, channels, 3, padding=1, groups=channels, bias=False),
+            nn.BatchNorm2d(channels),
+            nn.SiLU(),
+            nn.Conv2d(channels, 1, 1, bias=True),
+            nn.Sigmoid(),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Return a spatial redundancy map shaped [B, 1, H, W]."""
+        return self.gate(x)
+
+
+class _RSQFSparseSemanticRead(nn.Module):
+    """Use a small learned query set to sparsely read semantic cues from one modality."""
+
+    def __init__(self, dim: int, topk: int = 4):
+        super().__init__()
+        if topk < 1:
+            raise ValueError(f"topk must be >= 1, got {topk}.")
+        self.topk = int(topk)
+        self.q_proj = nn.Linear(dim, dim, bias=False)
+        self.k_proj = nn.Conv2d(dim, dim, 1, bias=False)
+        self.v_proj = nn.Conv2d(dim, dim, 1, bias=False)
+        self.norm_q = nn.LayerNorm(dim)
+        self.norm_z = nn.LayerNorm(dim)
+
+    def forward(self, queries: torch.Tensor, x: torch.Tensor):
+        """Return sparse semantic tokens and full query-to-space scores."""
+        bsz, dim, height, width = x.shape
+        num_pos = height * width
+        q = self.q_proj(self.norm_q(queries))
+        k = self.k_proj(x).flatten(2).transpose(1, 2)
+        v = self.v_proj(x).flatten(2).transpose(1, 2)
+        score = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(dim)
+        topk = min(self.topk, num_pos)
+        topv, topi = torch.topk(score, k=topk, dim=-1)
+        index = topi.unsqueeze(-1).expand(-1, -1, -1, dim)
+        v_expand = v.unsqueeze(1).expand(-1, q.shape[1], -1, -1)
+        v_sel = torch.gather(v_expand, dim=2, index=index)
+        attn = torch.softmax(topv, dim=-1).unsqueeze(-1)
+        sem = (attn * v_sel).sum(dim=2)
+        return self.norm_z(sem), score
+
+
+class _RSQFCrossQueryInteraction(nn.Module):
+    """Bidirectional query-level cross-modal interaction with slot gating."""
+
+    def __init__(self, dim: int, num_heads: int = 4):
+        super().__init__()
+        self.rgb_from_ir = _CSPATokenAttention(dim, num_heads=num_heads)
+        self.ir_from_rgb = _CSPATokenAttention(dim, num_heads=num_heads)
+        self.gate_rgb = nn.Sequential(nn.Linear(dim * 3, dim), nn.SiLU(), nn.Linear(dim, dim), nn.Sigmoid())
+        self.gate_ir = nn.Sequential(nn.Linear(dim * 3, dim), nn.SiLU(), nn.Linear(dim, dim), nn.Sigmoid())
+
+    def forward(self, rgb_sem: torch.Tensor, ir_sem: torch.Tensor):
+        """Exchange query-level messages across modalities."""
+        msg_rgb = self.rgb_from_ir(rgb_sem, ir_sem)
+        msg_ir = self.ir_from_rgb(ir_sem, rgb_sem)
+        gate_rgb = self.gate_rgb(torch.cat([rgb_sem, msg_rgb, rgb_sem * msg_rgb], dim=-1))
+        gate_ir = self.gate_ir(torch.cat([ir_sem, msg_ir, ir_sem * msg_ir], dim=-1))
+        return rgb_sem + gate_rgb * msg_rgb, ir_sem + gate_ir * msg_ir
+
+
+class RedundancySuppressedSparseSemanticQueryFusion(nn.Module):
+    """RS-SQF fusion for P4/P5: suppress redundancy, read sparse semantic queries, then inject back."""
+
+    def __init__(
+        self,
+        channels: int,
+        hidden_ratio: float = 0.25,
+        num_queries: int = 8,
+        topk: int = 4,
+        num_heads: int = 4,
+        gamma_init: float = 0.0,
+        redundancy_gamma_init: float = 0.0,
+    ):
+        super().__init__()
+        if channels <= 0:
+            raise ValueError("channels must be positive.")
+        if hidden_ratio <= 0:
+            raise ValueError("hidden_ratio must be positive.")
+        if num_queries <= 0:
+            raise ValueError("num_queries must be positive.")
+        hidden = max(num_heads, int(channels * hidden_ratio))
+        hidden = int(math.ceil(hidden / num_heads) * num_heads)
+
+        self.rgb_proj = Conv(channels, hidden, 1)
+        self.ir_proj = Conv(channels, hidden, 1)
+        self.rgb_red = _RSQFRedundancyGateLite(hidden)
+        self.ir_red = _RSQFRedundancyGateLite(hidden)
+        self.gamma_red = nn.Parameter(torch.tensor(float(redundancy_gamma_init)))
+        self.semantic_queries = nn.Parameter(torch.randn(num_queries, hidden) * 0.02)
+        self.rgb_read = _RSQFSparseSemanticRead(hidden, topk=topk)
+        self.ir_read = _RSQFSparseSemanticRead(hidden, topk=topk)
+        self.cross_query = _RSQFCrossQueryInteraction(hidden, num_heads=num_heads)
+        self.rgb_out = Conv(hidden, channels, 1, act=False)
+        self.ir_out = Conv(hidden, channels, 1, act=False)
+        self.gamma_rgb = nn.Parameter(torch.tensor(float(gamma_init)))
+        self.gamma_ir = nn.Parameter(torch.tensor(float(gamma_init)))
+        self.fuse = Conv(channels * 2, channels, 1, act=False)
+        self.relu = nn.ReLU(inplace=True)
+
+    @staticmethod
+    def _query_to_spatial(sem: torch.Tensor, score: torch.Tensor, height: int, width: int) -> torch.Tensor:
+        """Project enhanced semantic queries back to spatial layout."""
+        assign = torch.softmax(score.transpose(1, 2), dim=-1)
+        ctx = torch.matmul(assign, sem)
+        return ctx.transpose(1, 2).contiguous().view(sem.shape[0], sem.shape[2], height, width)
+
+    def forward(self, x_rgb: torch.Tensor, x_ir: torch.Tensor) -> torch.Tensor:
+        """Run RS-SQF on two high-level feature maps and return one fused map."""
+        bsz, _, height, width = x_rgb.shape
+        rgb = self.rgb_proj(x_rgb)
+        ir = self.ir_proj(x_ir)
+        rgb_clean = rgb + self.gamma_red * (-self.rgb_red(rgb) * rgb)
+        ir_clean = ir + self.gamma_red * (-self.ir_red(ir) * ir)
+        queries = self.semantic_queries.unsqueeze(0).expand(bsz, -1, -1)
+        rgb_sem, rgb_score = self.rgb_read(queries, rgb_clean)
+        ir_sem, ir_score = self.ir_read(queries, ir_clean)
+        rgb_sem, ir_sem = self.cross_query(rgb_sem, ir_sem)
+        rgb_ctx = self._query_to_spatial(rgb_sem, rgb_score, height, width)
+        ir_ctx = self._query_to_spatial(ir_sem, ir_score, height, width)
+        x_rgb = x_rgb + self.gamma_rgb * self.rgb_out(rgb_ctx)
+        x_ir = x_ir + self.gamma_ir * self.ir_out(ir_ctx)
+        return self.relu(self.fuse(torch.cat([x_rgb, x_ir], dim=1)))
+
+
+class CrossModalSemanticPrototypeAttention(nn.Module):
+    """Cross-modal Semantic Prototype Attention fusion block for high-level RGB-IR stages."""
+
+    def __init__(
+        self,
+        channels: int,
+        hidden_ratio: float = 0.5,
+        num_proto: int = 8,
+        num_heads: int = 4,
+        gamma_init: float = 0.0,
+    ):
+        super().__init__()
+        if channels <= 0:
+            raise ValueError("channels must be positive.")
+        if hidden_ratio <= 0:
+            raise ValueError("hidden_ratio must be positive.")
+        if num_proto <= 0:
+            raise ValueError("num_proto must be positive.")
+        if num_heads <= 0:
+            raise ValueError("num_heads must be positive.")
+
+        hidden = max(num_heads, int(channels * hidden_ratio))
+        hidden = int(math.ceil(hidden / num_heads) * num_heads)
+
+        self.rgb_proj = Conv(channels, hidden, 1)
+        self.ir_proj = Conv(channels, hidden, 1)
+        self.rgb_assign = nn.Conv2d(hidden, num_proto, 1, bias=True)
+        self.ir_assign = nn.Conv2d(hidden, num_proto, 1, bias=True)
+        self.rgb_proto_norm = nn.LayerNorm(hidden)
+        self.ir_proto_norm = nn.LayerNorm(hidden)
+
+        self.rgb_from_ir = _CSPATokenAttention(hidden, num_heads=num_heads)
+        self.ir_from_rgb = _CSPATokenAttention(hidden, num_heads=num_heads)
+
+        self.rgb_gate = nn.Sequential(
+            nn.Linear(hidden * 4, hidden, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden, hidden, bias=True),
+            nn.Sigmoid(),
+        )
+        self.ir_gate = nn.Sequential(
+            nn.Linear(hidden * 4, hidden, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden, hidden, bias=True),
+            nn.Sigmoid(),
+        )
+
+        self.rgb_inject = _CSPAPrototypeInjection(hidden, num_heads=num_heads)
+        self.ir_inject = _CSPAPrototypeInjection(hidden, num_heads=num_heads)
+        self.rgb_out = Conv(hidden, channels, 1, act=False)
+        self.ir_out = Conv(hidden, channels, 1, act=False)
+        self.gamma_rgb = nn.Parameter(torch.tensor(float(gamma_init)))
+        self.gamma_ir = nn.Parameter(torch.tensor(float(gamma_init)))
+
+        weight_hidden = max(8, channels // 4)
+        self.weight = nn.Sequential(Conv(channels * 3, weight_hidden, 1), nn.Conv2d(weight_hidden, 2, 1, bias=True))
+        self.fuse = Conv(channels * 3, channels, 1, act=False)
+        self.relu = nn.ReLU(inplace=True)
+
+    @staticmethod
+    def _gate_update(proto: torch.Tensor, msg: torch.Tensor, gate: nn.Module) -> torch.Tensor:
+        """Gate cross-modal semantic messages before residual prototype update."""
+        coeff = gate(torch.cat([proto, msg, torch.abs(proto - msg), proto * msg], dim=-1))
+        return proto + coeff * msg
+
+    @staticmethod
+    def _prototype_pool(x: torch.Tensor, assign_conv: nn.Module, norm: nn.LayerNorm) -> torch.Tensor:
+        """Aggregate BCHW features into K semantic prototypes shaped [B, K, C]."""
+        bsz, channels, _, _ = x.shape
+        assign = torch.softmax(assign_conv(x).view(bsz, -1, x.shape[-2] * x.shape[-1]), dim=-1)
+        feat = x.flatten(2).transpose(1, 2)
+        proto = assign @ feat
+        return norm(proto)
+
+    def forward_streams(self, x_rgb: torch.Tensor, x_ir: torch.Tensor):
+        """Exchange high-level semantic prototypes and return enhanced RGB/IR streams."""
+        rgb = self.rgb_proj(x_rgb)
+        ir = self.ir_proj(x_ir)
+
+        p_rgb = self._prototype_pool(rgb, self.rgb_assign, self.rgb_proto_norm)
+        p_ir = self._prototype_pool(ir, self.ir_assign, self.ir_proto_norm)
+
+        msg_rgb = self.rgb_from_ir(p_rgb, p_ir)
+        msg_ir = self.ir_from_rgb(p_ir, p_rgb)
+        p_rgb = self._gate_update(p_rgb, msg_rgb, self.rgb_gate)
+        p_ir = self._gate_update(p_ir, msg_ir, self.ir_gate)
+
+        ctx_rgb = self.rgb_inject(rgb, p_rgb)
+        ctx_ir = self.ir_inject(ir, p_ir)
+        x_rgb = x_rgb + self.gamma_rgb * self.rgb_out(ctx_rgb)
+        x_ir = x_ir + self.gamma_ir * self.ir_out(ctx_ir)
+        return x_rgb, x_ir
+
+    def fuse_streams(self, x_rgb: torch.Tensor, x_ir: torch.Tensor) -> torch.Tensor:
+        """Fuse two enhanced streams into one stage output."""
+        weights = torch.softmax(self.weight(torch.cat([x_rgb, x_ir, torch.abs(x_rgb - x_ir)], dim=1)), dim=1)
+        fused = self.fuse(torch.cat([weights[:, 0:1] * x_rgb, weights[:, 1:2] * x_ir, x_rgb * x_ir], dim=1))
+        return self.relu(fused)
+
+    def forward(self, x_rgb: torch.Tensor, x_ir: torch.Tensor) -> torch.Tensor:
+        """Exchange high-level semantic prototypes, inject them back, and fuse both streams."""
+        x_rgb, x_ir = self.forward_streams(x_rgb, x_ir)
+        return self.fuse_streams(x_rgb, x_ir)
+
+
+class StackedCrossModalSemanticPrototypeAttention(nn.Module):
+    """Stack multiple CSPA blocks while keeping dual streams until the final fusion."""
+
+    def __init__(
+        self,
+        channels: int,
+        hidden_ratio: float = 0.5,
+        num_proto: int = 8,
+        num_heads: int = 4,
+        gamma_init: float = 0.0,
+        depth: int = 2,
+    ):
+        super().__init__()
+        if depth < 2:
+            raise ValueError(f"StackedCrossModalSemanticPrototypeAttention requires depth >= 2, got {depth}.")
+        self.blocks = nn.ModuleList(
+            CrossModalSemanticPrototypeAttention(
+                channels,
+                hidden_ratio=hidden_ratio,
+                num_proto=num_proto,
+                num_heads=num_heads,
+                gamma_init=gamma_init,
+            )
+            for _ in range(depth)
+        )
+
+    def forward(self, x_rgb: torch.Tensor, x_ir: torch.Tensor) -> torch.Tensor:
+        """Apply N-1 stream updates, then fuse with the final CSPA block."""
+        for block in self.blocks[:-1]:
+            x_rgb, x_ir = block.forward_streams(x_rgb, x_ir)
+        return self.blocks[-1](x_rgb, x_ir)
+
+        weights = torch.softmax(self.weight(torch.cat([x_rgb, x_ir, torch.abs(x_rgb - x_ir)], dim=1)), dim=1)
+        fused = self.fuse(torch.cat([weights[:, 0:1] * x_rgb, weights[:, 1:2] * x_ir, x_rgb * x_ir], dim=1))
+        return self.relu(fused)

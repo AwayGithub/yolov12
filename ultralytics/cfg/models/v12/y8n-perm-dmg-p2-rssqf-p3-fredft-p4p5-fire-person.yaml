@@ -1,0 +1,58 @@
+# YOLOv8n backbone Perm-B: DMGInit8d@P2 + RS-SQF@P3 + CFRA/FreDFT@P4/P5.
+
+nc: 2
+ch: 6
+dual_stream: true
+
+p2_fusion: dmg_init8d
+dmg_diff_hidden_ratio: 0.25
+dmg_alpha_init: 1.0
+dmg_beta_init: -0.1
+freq_fusion_stages: [p4, p5]
+fredft_expansion: 3.0
+fredft_qkv_expand: 1.0
+fredft_checkpoint_ffn: true
+rssqf_fusion_stages: [p3]
+rssqf_hidden_ratio: 0.5
+rssqf_num_heads: 8
+rssqf_num_queries_p3: 12
+rssqf_topk_p3: 8
+rssqf_gamma_init: 0.0
+rssqf_redundancy_gamma_init: 0.0
+
+scales:
+  n: [0.33, 0.25, 1024]
+  s: [0.33, 0.50, 1024]
+
+backbone:
+  - [-1, 1, Conv, [64, 3, 2]]
+  - [-1, 1, Conv, [128, 3, 2]]
+  - [-1, 3, C2f, [128, True]]
+  - [-1, 1, Conv, [256, 3, 2]]
+  - [-1, 6, C2f, [256, True]]
+  - [-1, 1, Conv, [512, 3, 2]]
+  - [-1, 6, C2f, [512, True]]
+  - [-1, 1, Conv, [1024, 3, 2]]
+  - [-1, 3, C2f, [1024, True]]
+  - [-1, 1, SPPF, [1024, 5]]
+
+head:
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]
+  - [[-1, 6], 1, Concat, [1]]
+  - [-1, 3, C2f, [512]]
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]
+  - [[-1, 4], 1, Concat, [1]]
+  - [-1, 3, C2f, [256]]
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]
+  - [[-1, 2], 1, Concat, [1]]
+  - [-1, 3, C2f, [128]]
+  - [-1, 1, Conv, [128, 3, 2]]
+  - [[-1, 15], 1, Concat, [1]]
+  - [-1, 3, C2f, [256]]
+  - [-1, 1, Conv, [256, 3, 2]]
+  - [[-1, 12], 1, Concat, [1]]
+  - [-1, 3, C2f, [512]]
+  - [-1, 1, Conv, [512, 3, 2]]
+  - [[-1, 9], 1, Concat, [1]]
+  - [-1, 3, C2f, [1024]]
+  - [[18, 21, 24, 27], 1, Detect, [nc]]

@@ -1,0 +1,12 @@
+# RGBT-3M dual-input fire/person dataset for M2D-LIF migration reproduction.
+
+path: /data/xwh/code/yolov12/baselines/M2D-LIF/datasets/RGBT3M_fp_dual
+train: images/train
+val: images/val
+
+nc: 2
+ch: 6
+
+names:
+  0: fire
+  1: person

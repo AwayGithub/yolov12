@@ -1,0 +1,7 @@
+train_rgb: /data/xwh/code/yolov12/baselines/CALNet-Dronevehicle/data/RGBT-3M-fire-person/rgb/train/images
+train_ir: /data/xwh/code/yolov12/baselines/CALNet-Dronevehicle/data/RGBT-3M-fire-person/ir/train/images
+test_rgb: /data/xwh/code/yolov12/baselines/CALNet-Dronevehicle/data/RGBT-3M-fire-person/rgb/val/images
+test_ir: /data/xwh/code/yolov12/baselines/CALNet-Dronevehicle/data/RGBT-3M-fire-person/ir/val/images
+
+nc: 2
+names: [fire, person]

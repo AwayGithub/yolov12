@@ -1,0 +1,4 @@
+/data/xwh/code/yolov12/baselines/CALNet-Dronevehicle/data/RGBT-3M-fire-person/ir/val/images/video1_frame_00254.jpg
+/data/xwh/code/yolov12/baselines/CALNet-Dronevehicle/data/RGBT-3M-fire-person/ir/val/images/video1_frame_00256.jpg
+/data/xwh/code/yolov12/baselines/CALNet-Dronevehicle/data/RGBT-3M-fire-person/ir/val/images/video1_frame_00258.jpg
+/data/xwh/code/yolov12/baselines/CALNet-Dronevehicle/data/RGBT-3M-fire-person/ir/val/images/video1_frame_00274.jpg

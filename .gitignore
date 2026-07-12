@@ -1,5 +1,12 @@
 *__pycache__/
+*.cache
 runs/
+*.pt
+*.pth
+baselines/*/runs/
+baselines/*/runs_smoke/
+baselines/*/val_fire_person/
+baselines/*/*/runs_fire_person/
 FLAME2
 RGBT-3M
 CLAUDE.md

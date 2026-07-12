@@ -68,6 +68,9 @@ from ultralytics.nn.modules import (
     DMGFusion,
     DMGFusionPosAlpha,
     DMGFusionInit8d,
+    CrossModalSemanticPrototypeAttention,
+    RedundancySuppressedSparseSemanticQueryFusion,
+    StackedCrossModalSemanticPrototypeAttention,
     DualParallelCrossA2C2f,
     DualParallelCrossC3k2,
     M2DLocalIlluminationFusion,
@@ -597,6 +600,48 @@ class DualStreamDetectionModel(DetectionModel):
         self.lif_fusion_stages = set(_lif_stages)
         self.lif_gate = M2DLocalIlluminationGate() if self.lif_fusion_stages else None
 
+        _cspa_stages = self.yaml.get("cspa_fusion_stages", [])
+        if isinstance(_cspa_stages, str):
+            _cspa_stages = [s.strip() for s in _cspa_stages.split(",") if s.strip()]
+        _cspa_stages = list(_cspa_stages)
+        _valid_cspa_stages = {"p4", "p5"}
+        _unknown_cspa_stages = set(_cspa_stages) - _valid_cspa_stages
+        if _unknown_cspa_stages:
+            raise ValueError(
+                f"cspa_fusion_stages contains unsupported stages: {sorted(_unknown_cspa_stages)}. "
+                "Supported values: p4, p5."
+            )
+        _overlapped_stages = set(_cspa_stages) & (
+            self.dmg_fusion_stages | self.freq_fusion_stages | self.lif_fusion_stages
+        )
+        if _overlapped_stages:
+            raise ValueError(
+                f"cspa_fusion_stages overlaps with another fusion innovation at {sorted(_overlapped_stages)}. "
+                "Use one fusion innovation per stage."
+            )
+        self.cspa_fusion_stages = set(_cspa_stages)
+
+        _rssqf_stages = self.yaml.get("rssqf_fusion_stages", [])
+        if isinstance(_rssqf_stages, str):
+            _rssqf_stages = [s.strip() for s in _rssqf_stages.split(",") if s.strip()]
+        _rssqf_stages = list(_rssqf_stages)
+        _valid_rssqf_stages = set(self.FUSION_LAYER_INDICES)
+        _unknown_rssqf_stages = set(_rssqf_stages) - _valid_rssqf_stages
+        if _unknown_rssqf_stages:
+            raise ValueError(
+                f"rssqf_fusion_stages contains unsupported stages: {sorted(_unknown_rssqf_stages)}. "
+                f"Supported values: {sorted(_valid_rssqf_stages)}."
+            )
+        _overlapped_stages = set(_rssqf_stages) & (
+            self.dmg_fusion_stages | self.freq_fusion_stages | self.lif_fusion_stages | self.cspa_fusion_stages
+        )
+        if _overlapped_stages:
+            raise ValueError(
+                f"rssqf_fusion_stages overlaps with another fusion innovation at {sorted(_overlapped_stages)}. "
+                "Use one fusion innovation per stage."
+            )
+        self.rssqf_fusion_stages = set(_rssqf_stages)
+
         _parallel_cross_stages = self.yaml.get("parallel_cross_a2c2f_stages", [])
         if isinstance(_parallel_cross_stages, str):
             _parallel_cross_stages = [s.strip() for s in _parallel_cross_stages.split(",") if s.strip()]
@@ -609,7 +654,11 @@ class DualStreamDetectionModel(DetectionModel):
                 f"{sorted(_unknown_parallel_cross_stages)}. Supported values: {sorted(_valid_parallel_cross_stages)}."
             )
         _overlapped_stages = set(_parallel_cross_stages) & (
-            self.dmg_fusion_stages | self.freq_fusion_stages | self.lif_fusion_stages
+            self.dmg_fusion_stages
+            | self.freq_fusion_stages
+            | self.lif_fusion_stages
+            | self.cspa_fusion_stages
+            | self.rssqf_fusion_stages
         )
         if _overlapped_stages:
             raise ValueError(
@@ -648,6 +697,32 @@ class DualStreamDetectionModel(DetectionModel):
                     gamma_max=float(self.yaml.get("parallel_cross_gamma_max", 0.35)),
                     scale_init=float(self.yaml.get("parallel_cross_gamma_init", 0.01)),
                 )
+            elif isinstance(old_layer, C2f):
+                c1 = old_layer.cv1.conv.in_channels
+                c2 = old_layer.cv2.conv.out_channels
+                n = len(old_layer.m)
+                area = int(self.yaml.get("parallel_cross_area", 4 if stage_name == "p4" else 1))
+                mlp_ratio = float(self.yaml.get("parallel_cross_self_mlp_ratio", 2.0))
+                new_layer = DualParallelCrossA2C2f(
+                    c1,
+                    c2,
+                    n=n,
+                    self_depth=self.yaml.get("parallel_cross_self_depth"),
+                    cross_depth=self.yaml.get("parallel_cross_cross_depth"),
+                    stage_concat=bool(self.yaml.get("parallel_cross_stage_concat", False)),
+                    cross_mid_scale_rgb_init=float(self.yaml.get("parallel_cross_mid_rgb_scale_init", 1.0)),
+                    cross_mid_scale_ir_init=float(self.yaml.get("parallel_cross_mid_ir_scale_init", 1.0)),
+                    area=area,
+                    mlp_ratio=mlp_ratio,
+                    cross_mlp_ratio=float(self.yaml.get("parallel_cross_mlp_ratio", mlp_ratio)),
+                    cross_scale_rgb_init=float(self.yaml.get("parallel_cross_rgb_scale_init", 1.0)),
+                    cross_scale_ir_init=float(self.yaml.get("parallel_cross_ir_scale_init", 1.0)),
+                    learnable_cross_scale=bool(self.yaml.get("parallel_cross_learnable_scale", True)),
+                    cross_drop_path=float(self.yaml.get("parallel_cross_drop_path", 0.0)),
+                    gamma_mode=str(self.yaml.get("parallel_cross_gamma_mode", "free")),
+                    gamma_max=float(self.yaml.get("parallel_cross_gamma_max", 0.35)),
+                    scale_init=float(self.yaml.get("parallel_cross_gamma_init", 0.01)),
+                )
             elif isinstance(old_layer, C3k2):
                 c1 = old_layer.cv1.conv.in_channels
                 c2 = old_layer.cv2.conv.out_channels
@@ -666,7 +741,7 @@ class DualStreamDetectionModel(DetectionModel):
                 )
             else:
                 raise ValueError(
-                    f"parallel_cross_a2c2f_stages requires A2C2f or C3k2 at {stage_name}, "
+                    f"parallel_cross_a2c2f_stages requires A2C2f, C2f, or C3k2 at {stage_name}, "
                     f"got {type(old_layer).__name__}."
                 )
             new_layer.i = old_layer.i
@@ -693,6 +768,34 @@ class DualStreamDetectionModel(DetectionModel):
                     offset=float(self.yaml.get("lif_offset", 0.31)),
                     scale=float(self.yaml.get("lif_scale", 0.63)),
                     max_step=float(self.yaml.get("lif_max_step", 0.5)),
+                )
+            elif stage_name in self.cspa_fusion_stages:
+                cspa_depth = int(self.yaml.get(f"cspa_depth_{stage_name}", self.yaml.get("cspa_depth", 1)))
+                if cspa_depth < 1:
+                    raise ValueError(f"cspa_depth for {stage_name} must be >= 1, got {cspa_depth}.")
+                cspa_kwargs = dict(
+                    channels=c_out,
+                    hidden_ratio=float(self.yaml.get("cspa_hidden_ratio", 0.5)),
+                    num_proto=int(self.yaml.get(f"cspa_num_proto_{stage_name}", 8 if stage_name == "p4" else 4)),
+                    num_heads=int(self.yaml.get("cspa_num_heads", 4)),
+                    gamma_init=float(self.yaml.get("cspa_gamma_init", 0.0)),
+                )
+                if cspa_depth == 1:
+                    self.fusion_convs[stage_name] = CrossModalSemanticPrototypeAttention(**cspa_kwargs)
+                else:
+                    self.fusion_convs[stage_name] = StackedCrossModalSemanticPrototypeAttention(
+                        depth=cspa_depth,
+                        **cspa_kwargs,
+                    )
+            elif stage_name in self.rssqf_fusion_stages:
+                self.fusion_convs[stage_name] = RedundancySuppressedSparseSemanticQueryFusion(
+                    c_out,
+                    hidden_ratio=float(self.yaml.get("rssqf_hidden_ratio", 0.25)),
+                    num_queries=int(self.yaml.get(f"rssqf_num_queries_{stage_name}", 8 if stage_name == "p4" else 4)),
+                    topk=int(self.yaml.get(f"rssqf_topk_{stage_name}", 4)),
+                    num_heads=int(self.yaml.get("rssqf_num_heads", 4)),
+                    gamma_init=float(self.yaml.get("rssqf_gamma_init", 0.0)),
+                    redundancy_gamma_init=float(self.yaml.get("rssqf_redundancy_gamma_init", 0.0)),
                 )
             elif stage_name in self.dmg_fusion_stages and _dmg_fusion_mode == "dmg":
                 self.fusion_convs[stage_name] = DMGFusion(c_out)
@@ -869,7 +972,18 @@ class DualStreamDetectionModel(DetectionModel):
             fc = self.fusion_convs[stage_name]
             if isinstance(fc, M2DLocalIlluminationFusion):
                 fused[stage_name] = fc(r, i, lif_illumination)
-            elif isinstance(fc, (DMGFusion, DMGFusionPosAlpha, DMGFusionInit8d, FreDFTFusion)):
+            elif isinstance(
+                fc,
+                (
+                    DMGFusion,
+                    DMGFusionPosAlpha,
+                    DMGFusionInit8d,
+                    FreDFTFusion,
+                    CrossModalSemanticPrototypeAttention,
+                    RedundancySuppressedSparseSemanticQueryFusion,
+                    StackedCrossModalSemanticPrototypeAttention,
+                ),
+            ):
                 fused[stage_name] = fc(r, i)
             else:
                 fused[stage_name] = fc(torch.cat([r, i], dim=1))
