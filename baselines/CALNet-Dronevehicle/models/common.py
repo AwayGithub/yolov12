@@ -443,7 +443,13 @@ class DetectMultiBackend(nn.Module):
         if self.pt or self.engine or self.onnx:  # warmup types
             if isinstance(self.device, torch.device) and self.device.type != 'cpu':  # only warmup GPU models
                 im = torch.zeros(*imgsz).to(self.device).type(torch.half if half else torch.float)  # input image
-                self.forward(im)  # warmup
+                if imgsz[1] == 6:
+                    # CALNet dual-input warmup
+                    img_rgb = im[:, :3, :, :]
+                    img_ir = im[:, 3:, :, :]
+                    self.forward(img_rgb, img_ir, val=True)
+                else:
+                    self.forward(im)  # warmup
 
 
 class AutoShape(nn.Module):

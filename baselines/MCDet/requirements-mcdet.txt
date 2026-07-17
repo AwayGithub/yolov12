@@ -1,0 +1,7 @@
+# MCDet baseline dependencies for the local yolov12 environment.
+# This wheel matches Python 3.11, torch 2.2, CUDA 12 and cxx11abiFALSE.
+https://github.com/state-spaces/mamba/releases/download/v2.2.4/mamba_ssm-2.2.4+cu12torch2.2cxx11abiFALSE-cp311-cp311-linux_x86_64.whl
+
+transformers==4.41.2
+huggingface-hub==0.23.2
+safetensors==0.4.3

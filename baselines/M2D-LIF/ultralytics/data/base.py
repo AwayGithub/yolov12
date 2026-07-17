@@ -172,13 +172,16 @@ class BaseDataset(Dataset):
                 raise FileNotFoundError(f'Image Not Found {f}')
 
             h0, w0 = im.shape[:2]  # orig hw
+            imgsz = max(self.imgsz) if isinstance(self.imgsz, (list, tuple)) else self.imgsz
             if rect_mode:  # resize long side to imgsz while maintaining aspect ratio
-                r = self.imgsz / max(h0, w0)  # ratio
+                r = imgsz / max(h0, w0)  # ratio
                 if r != 1:  # if sizes are not equal
-                    w, h = (min(math.ceil(w0 * r), self.imgsz), min(math.ceil(h0 * r), self.imgsz))
+                    w, h = (min(math.ceil(w0 * r), imgsz), min(math.ceil(h0 * r), imgsz))
                     im = cv2.resize(im, (w, h), interpolation=cv2.INTER_LINEAR)
-            elif not (h0 == w0 == self.imgsz):  # resize by stretching image to square imgsz
-                im = cv2.resize(im, (self.imgsz, self.imgsz), interpolation=cv2.INTER_LINEAR)
+            elif isinstance(self.imgsz, (list, tuple)):
+                im = cv2.resize(im, (self.imgsz[1], self.imgsz[0]), interpolation=cv2.INTER_LINEAR)
+            elif not (h0 == w0 == imgsz):  # resize by stretching image to square imgsz
+                im = cv2.resize(im, (imgsz, imgsz), interpolation=cv2.INTER_LINEAR)
 
 
             # Add to buffer if training with augmentations
@@ -221,7 +224,8 @@ class BaseDataset(Dataset):
         n = min(self.ni, 30)  # extrapolate from 30 random images
         for _ in range(n):
             im = cv2.imread(random.choice(self.im_files))  # sample image
-            ratio = self.imgsz / max(im.shape[0], im.shape[1])  # max(h, w)  # ratio
+            imgsz = max(self.imgsz) if isinstance(self.imgsz, (list, tuple)) else self.imgsz
+            ratio = imgsz / max(im.shape[0], im.shape[1])  # max(h, w)  # ratio
             b += im.nbytes * ratio ** 2
         mem_required = b * self.ni / n * (1 + safety_margin)  # GB required to cache dataset into RAM
         mem = psutil.virtual_memory()
@@ -237,6 +241,11 @@ class BaseDataset(Dataset):
         """Sets the shape of bounding boxes for YOLO detections as rectangles."""
         bi = np.floor(np.arange(self.ni) / self.batch_size).astype(int)  # batch index
         nb = bi[-1] + 1  # number of batches
+
+        if isinstance(self.imgsz, (list, tuple)):
+            self.batch_shapes = np.tile(self.imgsz, (nb, 1))
+            self.batch = bi
+            return
 
         s = np.array([x.pop('shape') for x in self.labels])  # hw
         ar = s[:, 0] / s[:, 1]  # aspect ratio

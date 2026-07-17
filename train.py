@@ -56,6 +56,11 @@ def parse_args():
     parser.add_argument("--batch", type=int, default=16, help="训练 batch size，默认 16")
     parser.add_argument("--no_amp", action="store_true", help="关闭 AMP 混合精度训练")
     parser.add_argument(
+        "--default_aug",
+        action="store_true",
+        help="保留 Ultralytics 默认数据增强；不传时使用主实验的无增强设置",
+    )
+    parser.add_argument(
         "--resume",
         type=str,
         default=None,
@@ -314,7 +319,7 @@ if __name__ == "__main__":
             f"small every {args.gradient_probe_small_period} epochs; full epochs={full_epochs}."
         )
 
-    results = model.train(
+    train_kwargs = dict(
         data=data_cfg,
         resume=bool(args.resume),
         epochs=args.epochs if args.epochs is not None else 200,
@@ -339,3 +344,21 @@ if __name__ == "__main__":
         amp=not args.no_amp,
         save_period=args.save_period,
     )
+    if not args.default_aug:
+        train_kwargs.update(
+            hsv_h=0.0,
+            hsv_s=0.0,
+            hsv_v=0.0,
+            degrees=0.0,
+            translate=0.0,
+            scale=0.0,
+            shear=0.0,
+            perspective=0.0,
+            flipud=0.0,
+            fliplr=0.0,
+            mosaic=0.0,
+            mixup=0.0,
+            copy_paste=0.0,
+        )
+
+    results = model.train(**train_kwargs)

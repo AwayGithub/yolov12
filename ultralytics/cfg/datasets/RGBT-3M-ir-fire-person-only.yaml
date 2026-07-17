@@ -1,13 +1,8 @@
-# RGBT-3M IR-only fire/person dataset for mono-modal teacher training.
-
+# YOLOv11n IR-only fire/person
 path: /data/xwh/code/yolov12/baselines/M2D-LIF/datasets/RGBT3M_fp_ir
 train: images/train
 val: images/val
-
 nc: 2
-ch: 3
-input_mode: ir_input
-
 names:
   0: fire
   1: person

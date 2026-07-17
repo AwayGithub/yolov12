@@ -2,6 +2,7 @@
 nc: 2  # number of classes
 depth_multiple: 0.33  # model depth multiple
 width_multiple: 0.25  # layer channel multiple
+obb: false  # use horizontal boxes for RGBT-3M fire/person
 
 # anchors
 anchors:

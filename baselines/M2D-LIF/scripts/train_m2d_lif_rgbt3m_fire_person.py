@@ -7,6 +7,7 @@ from ultralytics.nn.tasks import attempt_load_one_weight
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--data', required=True)
+    parser.add_argument('--model', default='./model_yaml/yolov8-LIF.yaml')
     parser.add_argument('--teacher_rgb', required=True)
     parser.add_argument('--teacher_ir', required=True)
     parser.add_argument('--device', default='0')
@@ -30,7 +31,7 @@ def main():
     _, teacher_ir = attempt_load_one_weight(args.teacher_ir)
     overrides = dict(
         ch=6,
-        model='./model_yaml/yolov8n-LIF-fire-person.yaml',
+        model=args.model,
         data=args.data,
         Distillation='MultiDistillation',
         distill_weight=0.8,

@@ -110,6 +110,7 @@ class ComputeLoss:
             BCEtheta = FocalLoss(BCEtheta, g)
 
         det = model.module.model[-1] if is_parallel(model) else model.model[-1]  # Detect() module
+        self.obb = getattr(det, 'obb', h.get('obb', True))
         self.stride = det.stride # tensor([8., 16., 32., ...])
         self.balance = {3: [4.0, 1.0, 0.4]}.get(det.nl, [4.0, 1.0, 0.25, 0.06, 0.02])  # P3-P7
         # self.ssi = list(det.stride).index(16) if autobalance else 0  # stride 16 index
@@ -132,7 +133,6 @@ class ComputeLoss:
         device = targets.device
         lcls, lbox, lobj = torch.zeros(1, device=device), torch.zeros(1, device=device), torch.zeros(1, device=device)
         ltheta = torch.zeros(1, device=device)
-        # tcls, tbox, indices, anchors = self.build_targets(p, targets)  # targets
         tcls, tbox, indices, anchors, tgaussian_theta = self.build_targets(p, targets)  # targets
 
         # Losses
@@ -167,9 +167,10 @@ class ComputeLoss:
                     # lcls += self.BCEcls(ps[:, 5:], t)  # BCE
                     lcls += self.BCEcls(ps[:, 5:class_index], t)  # BCE
                 
-                # theta Classification by Circular Smooth Label
-                t_theta = tgaussian_theta[i].type(ps.dtype) # target theta_gaussian_labels
-                ltheta += self.BCEtheta(ps[:, class_index:], t_theta)
+                if self.obb:
+                    # theta Classification by Circular Smooth Label
+                    t_theta = tgaussian_theta[i].type(ps.dtype) # target theta_gaussian_labels
+                    ltheta += self.BCEtheta(ps[:, class_index:], t_theta)
 
                 # Append targets to text file
                 # with open('targets.txt', 'a') as file:
@@ -185,7 +186,7 @@ class ComputeLoss:
         lbox *= self.hyp['box']
         lobj *= self.hyp['obj']
         lcls *= self.hyp['cls']
-        ltheta *= self.hyp['theta']
+        ltheta *= self.hyp.get('theta', 0.0) if self.obb else 0.0
         bs = tobj.shape[0]  # batch size
 
         # return (lbox + lobj + lcls) * bs, torch.cat((lbox, lobj, lcls)).detach()
@@ -257,7 +258,7 @@ class ComputeLoss:
             gxy = t[:, 2:4]  # grid xy
             gwh = t[:, 4:6]  # grid wh
             # theta = t[:, 6]
-            gaussian_theta_labels = t[:, 7:-1]
+            gaussian_theta_labels = t[:, 7:-1] if self.obb else t[:, 6:6]
             gij = (gxy - offsets).long()
             gi, gj = gij.T  # grid xy indices
 

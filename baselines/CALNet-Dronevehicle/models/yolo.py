@@ -37,7 +37,8 @@ class Detect(nn.Module):
     def __init__(self, nc=80, anchors=(), ch=(), inplace=True):  # detection layer
         super().__init__()
         self.nc = nc  # number of classes
-        self.no = nc + 5 + 180  # number of outputs per anchor
+        self.obb = False
+        self.no = nc + 5  # number of outputs per anchor
         self.nl = len(anchors)  # number of detection layers
         self.na = len(anchors[0]) // 2  # number of anchors
         self.grid = [torch.zeros(1)] * self.nl  # init grid
@@ -321,7 +322,8 @@ def parse_model(d, ch):  # model_dict, input_channels(3)
     anchors, nc, gd, gw = d['anchors'], d['nc'], d['depth_multiple'], d['width_multiple']
     na = (len(anchors[0]) // 2) if isinstance(anchors, list) else anchors  # number of anchors
     # no = na * (nc + 5)  # number of outputs = anchors * (classes + 5)
-    no = na * (nc + 185)  # number of outputs = anchors * (classes + 185)
+    obb = d.get('obb', True)
+    no = na * (nc + (185 if obb else 5))  # number of outputs
 
     layers, save, c2 = [], [], ch[-1]  # layers, savelist, ch out
     for i, (f, n, m, args) in enumerate(d['backbone'] + d['head']):  # from, number, module, args
@@ -404,6 +406,10 @@ def parse_model(d, ch):  # model_dict, input_channels(3)
             c2 = ch[f]
 
         m_ = nn.Sequential(*(m(*args) for _ in range(n))) if n > 1 else m(*args)  # module
+        if m is Detect:
+            m_.obb = obb
+            m_.no = nc + (185 if obb else 5)
+            m_.m = nn.ModuleList(nn.Conv2d(x, m_.no * m_.na, 1) for x in args[2])
         t = str(m)[8:-2].replace('__main__.', '')  # module type
         np = sum(x.numel() for x in m_.parameters())  # number params
         m_.i, m_.f, m_.type, m_.np = i, f, t, np  # attach index, 'from' index, type, number params

@@ -30,7 +30,7 @@ from utils.augmentations import Albumentations, augment_hsv, copy_paste, letterb
 from utils.general import (LOGGER, NUM_THREADS, check_dataset, check_requirements, check_yaml, clean_str,segment2box,
                            segments2boxes, xyn2xy, xywh2xyxy, xywhn2xyxy, xyxy2xywhn)
 from utils.torch_utils import torch_distributed_zero_first
-from utils.rboxs_utils import poly_filter, poly2rbox
+from utils.rboxs_utils import poly_filter, poly2hbb, poly2rbox
 
 # Parameters
 HELP_URL = 'https://github.com/ultralytics/yolov5/wiki/Train-Custom-Data'
@@ -807,7 +807,8 @@ class LoadMultiModalImagesAndLabels(Dataset):
             # Cutouts
             # labels = cutout(img, labels, p=0.5)
             # nl = len(labels)  # update after cutout
-        if nL:
+        use_obb = hyp.get('obb', True) if hyp else False  # validation defaults to HBB
+        if nL and use_obb:
         # *[clsid poly] to *[clsid cx cy l s theta gaussian_θ_labels] θ∈[-pi/2, pi/2) non-normalized
             rboxes, csl_labels  = poly2rbox(polys=labels_rgb[:, 1:], 
                                             num_cls_thata=hyp['cls_theta'] if hyp else 180, 
@@ -819,11 +820,21 @@ class LoadMultiModalImagesAndLabels(Dataset):
                         & (rboxes[:, 2] > 5) | (rboxes[:, 3] > 5)
             labels_obb = labels_obb[labels_mask]
             nL = len(labels_obb)  # update after filter
+        elif nL:
+            hboxes = poly2hbb(labels_rgb[:, 1:])
+            labels_obb = np.concatenate((labels_rgb[:, :1], hboxes), axis=1)
+            labels_mask = (hboxes[:, 0] >= 0) & (hboxes[:, 0] < img_rgb.shape[1]) \
+                        & (hboxes[:, 1] >= 0) & (hboxes[:, 1] < img_rgb.shape[0]) \
+                        & ((hboxes[:, 2] > 5) | (hboxes[:, 3] > 5))
+            labels_obb = labels_obb[labels_mask]
+            nL = len(labels_obb)  # update after filter
+        else:
+            labels_obb = np.zeros((0, 5), dtype=np.float32)
         
-        if hyp:
+        if hyp and use_obb:
             c_num = 7 + hyp['cls_theta'] # [index_of_batch clsid cx cy l s theta gaussian_θ_labels]
         else:
-            c_num = 187
+            c_num = 6
 
         # labels_out = torch.zeros((nl, 6))
         labels_out = torch.zeros((nL, c_num))

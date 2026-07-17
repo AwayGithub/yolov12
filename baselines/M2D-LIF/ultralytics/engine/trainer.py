@@ -30,8 +30,8 @@ from ultralytics.utils.autobatch import check_train_batch_size
 from ultralytics.utils.checks import check_amp, check_file, check_imgsz, check_model_file_from_stem, print_args
 from ultralytics.utils.dist import ddp_cleanup, generate_ddp_command
 from ultralytics.utils.files import get_latest_run
-from ultralytics.utils.torch_utils import (EarlyStopping, ModelEMA, de_parallel, init_seeds, one_cycle, select_device,
-                                           strip_optimizer)
+from ultralytics.utils.torch_utils import (EarlyStopping, ModelEMA, de_parallel, init_seeds, make_divisible,
+                                           one_cycle, select_device, strip_optimizer)
 
 from ultralytics.utils.tal import TaskAlignedAssigner, make_anchors, dist2bbox, RotatedTaskAlignedAssigner
 from ultralytics.utils.loss import RotatedBboxLoss
@@ -287,9 +287,12 @@ class Distillation_loss(nn.Module):
         length_t = len(layers_t)
         length_s = len(layers_s)
         assert length_t == length_s
-        # yolov8n (n-scale): teacher P3/P4/P5 = 64/128/256
-        channels_s = [64, 128, 256]
-        channels_t = [64, 128, 256]
+        # Derive channel counts from teacher model to support n/s/m/l scales.
+        _t_ch = []
+        for _li in (4, 6, 8):
+            _t_ch.append(teacher_model.model[_li].cv2.conv.out_channels)
+        channels_s = _t_ch
+        channels_t = _t_ch
 
         self.D_loss_fn = FeatureLoss(channels_s=channels_s, channels_t=channels_t, distiller=distiller)
 
@@ -383,11 +386,16 @@ class Multimodal_Distillation_loss(nn.Module):
 
         assert length_t_rgb == length_s_rgb and length_t_ir == length_s_ir
 
-        # yolov8n (n-scale)
-        channels_s_rgb = [64, 128, 256]
-        channels_s_ir = [64, 128, 256]
-        channels_t_rgb = [64, 128, 256]
-        channels_t_ir = [64, 128, 256]
+        # Derive channel counts from teacher model to support n/s/m/l scales.
+        _t_layers = [int(i) for i in layers_t_rgb] if layers_t_rgb else [4, 6, 8]
+        _ch = []
+        for _li in _t_layers:
+            _c = teacher_model_rgb.model[_li].cv2.conv.out_channels
+            _ch.append(_c)
+        channels_s_rgb = _ch
+        channels_s_ir  = _ch
+        channels_t_rgb = _ch
+        channels_t_ir  = _ch
 
         self.D_loss_fn_rgb = FeatureLoss(channels_s=channels_s_rgb, channels_t=channels_t_rgb, distiller=distiller)
         self.D_loss_fn_ir = FeatureLoss(channels_s=channels_s_ir, channels_t=channels_t_ir, distiller=distiller)
@@ -776,24 +784,19 @@ class BaseTrainer:
         self.amp = bool(self.amp)  # as boolean
         self.scaler = torch.cuda.amp.GradScaler(enabled=self.amp)
         if world_size > 1:
-            self.model = nn.parallel.DistributedDataParallel(self.model, device_ids=[RANK])
+            self.model = nn.parallel.DistributedDataParallel(self.model, device_ids=[RANK], find_unused_parameters=True)
 
-            # 是否蒸馏
+            # 是否蒸馏 — teachers stay un-wrapped; they are eval-only with no gradients.
             if self.Distillation is not None:
                 if self.Distillation == "MultiDistillation":  # 多模态蒸馏
-                    self.Teacher_Model_IR = nn.parallel.DistributedDataParallel(self.Teacher_Model_IR,
-                                                                                device_ids=[RANK])
                     self.Teacher_Model_IR.eval()
-                    self.Teacher_Model_RGB = nn.parallel.DistributedDataParallel(self.Teacher_Model_RGB,
-                                                                                 device_ids=[RANK])
                     self.Teacher_Model_RGB.eval()
                 else:  # 单模态蒸馏
-                    self.Teacher_Model = nn.parallel.DistributedDataParallel(self.Teacher_Model, device_ids=[RANK])
                     self.Teacher_Model.eval()
 
         # Check imgsz
         gs = max(int(self.model.stride.max() if hasattr(self.model, 'stride') else 32), 32)  # grid size (max stride)
-        self.args.imgsz = check_imgsz(self.args.imgsz, stride=gs, floor=gs, max_dim=1)
+        self.args.imgsz = check_imgsz(self.args.imgsz, stride=gs, floor=gs, max_dim=2)
         self.stride = gs  # for multi-scale training
 
         # Batch size
@@ -812,17 +815,17 @@ class BaseTrainer:
             self.validator = self.get_validator()
             metric_keys = self.validator.metrics.keys + self.label_loss_items(prefix='val')
             self.metrics = dict(zip(metric_keys, [0] * len(metric_keys)))
-            self.ema = ModelEMA(self.model)
+            self.ema = ModelEMA(self.model) if RANK == -1 else ModelEMA(de_parallel(self.model))
             if self.args.plots:
                 self.plot_training_labels()
 
         # 是否蒸馏
         if self.Distillation is not None:
             if self.Distillation == "MultiDistillation":  # 多模态蒸馏
-                self.distillation_loss = Multimodal_Distillation_loss(self.model, self.Teacher_Model_RGB,
+                self.distillation_loss = Multimodal_Distillation_loss(de_parallel(self.model), self.Teacher_Model_RGB,
                                                                       self.Teacher_Model_IR, distiller=self.loss_type)
             else:  # 单模态蒸馏
-                self.distillation_loss = Distillation_loss(self.model, self.Teacher_Model, distiller=self.loss_type)
+                self.distillation_loss = Distillation_loss(de_parallel(self.model), self.Teacher_Model, distiller=self.loss_type)
 
         # Optimizer
         self.accumulate = max(round(self.args.nbs / self.batch_size), 1)  # accumulate loss before optimizing
@@ -864,10 +867,10 @@ class BaseTrainer:
         # 是否蒸馏
         if self.Distillation is not None:
             if self.Distillation == "MultiDistillation":  # 多模态蒸馏
-                self.distillation_loss = Multimodal_Distillation_loss(self.model, self.Teacher_Model_RGB,
+                self.distillation_loss = Multimodal_Distillation_loss(de_parallel(self.model), self.Teacher_Model_RGB,
                                                                       self.Teacher_Model_IR, distiller=self.loss_type, )
             else:
-                self.distillation_loss = Distillation_loss(self.model, self.Teacher_Model, distiller=self.loss_type)
+                self.distillation_loss = Distillation_loss(de_parallel(self.model), self.Teacher_Model, distiller=self.loss_type)
 
         ##################################### distillation #####################################
         weight_decay = self.args.weight_decay * self.batch_size * self.accumulate / self.args.nbs  # scale weight_decay
@@ -983,7 +986,7 @@ class BaseTrainer:
                         # y = 0.299 * r + 0.587 * g + 0.114 * b
                         # gt = self.pool_for_FIA(y)
 
-                        FIA_module = self.model.model[2]
+                        FIA_module = de_parallel(self.model).model[2]
                         weight = FIA_module(RGB_img)
                         illumination_loss = torch.abs(gt - weight).mean()  # no_sup
                         illumination_loss *= 1.3  # weight

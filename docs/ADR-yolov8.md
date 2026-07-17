@@ -2,7 +2,7 @@
 
 **状态：** 进行中  
 **创建日期：** 2026-07-05  
-**最后更新：** 2026-07-10  
+**最后更新：** 2026-07-18
 **相关文档：** [ADR-005](ADR-005-fire-person-binary-scope.md)
 
 ## 一、当前结论
@@ -21,6 +21,7 @@
 4. 同一 A1 创新组合下，YOLOv8n 骨架明显好于 YOLOv12n 骨架。
 5. 高层语义交互支线中，`C6.5` 已首次显示出超过 `A1-y8n-backbone` 的趋势，P4/P5 融合后续固定采用 `C6.5` 配置。
 6. 6 个层级消融已完成：三个同构铺满实验均低于 C6.5，两个高层错位实验明显低于 C6.5；`Perm-A` 接近 C6.5 但未超过。
+7. 去掉 P2 检测头的 G67 消融已完成，latest csv epoch191 的 overall `mAP50-95=0.58208`，明显低于带 P2 检测头的 C6.5。
 
 ## 二、统一实验口径
 
@@ -139,6 +140,36 @@
 | y8n-Perm-C | csv epoch200 | fire | 0.94344 | 0.88503 | 0.94181 | 0.59174 |
 | y8n-Perm-C | csv epoch200 | person | 0.91391 | 0.89734 | 0.93653 | 0.58638 |
 
+### 6.4 C6.5 骨干替换消融
+
+`C65-y12n-backbone-fire-person.yaml` 保持 C6.5 的 `DMGInit8d@P2 + CFRA@P3 + RS-SQF@P4/P5`，仅替换为 YOLOv12n backbone/neck。下表为 `train_fp_C65_y12nbackbone_seed0_cls014/results.csv` 最后一行（epoch 200）的训练期验证指标。
+
+| 消融 | checkpoint | 类别 | P | R | mAP50 | mAP50-95 |
+| --- | --- | --- | ---: | ---: | ---: | ---: |
+| C6.5-y12n-backbone | csv epoch200 | all | 0.91338 | 0.90210 | 0.93514 | 0.57605 |
+| C6.5-y12n-backbone | csv epoch200 | fire | 0.92184 | 0.90121 | 0.93576 | 0.57798 |
+| C6.5-y12n-backbone | csv epoch200 | person | 0.90492 | 0.90299 | 0.93453 | 0.57412 |
+
+`C65-y11n-backbone-fire-person.yaml` 保持 C6.5 的 `DMGInit8d@P2 + CFRA@P3 + RS-SQF@P4/P5`，仅替换为 YOLOv11n backbone/neck。下表为 `train_fp_C65_y11nbackbone_seed0_cls01/results.csv` 最后一行（epoch 200）的训练期验证指标。
+
+| 消融 | checkpoint | 类别 | P | R | mAP50 | mAP50-95 |
+| --- | --- | --- | ---: | ---: | ---: | ---: |
+| C6.5-y11n-backbone | csv epoch200 | all | 0.91594 | 0.89999 | 0.93313 | 0.57794 |
+| C6.5-y11n-backbone | csv epoch200 | fire | 0.92260 | 0.90091 | 0.93903 | 0.58381 |
+| C6.5-y11n-backbone | csv epoch200 | person | 0.90927 | 0.89906 | 0.92723 | 0.57207 |
+
+### 6.5 去掉 P2 检测头消融
+
+`G67-y8n-backbone-fire-person.yaml` 保持 `P2-DMG + P3-CFRA + P4/P5-RS-SQF` 分层融合结构，但 Detect 只使用 `P3/P4/P5`，去掉 P2 检测输出。下表为 `train_fp_G67_y8n_p2dmg_p3cfra_p45rssqf_nop2det_noaug_seed0/results.csv` 最后一行（epoch 191）的训练期验证指标。
+
+| 消融 | checkpoint | 类别 | P | R | mAP50 | mAP50-95 |
+| --- | --- | --- | ---: | ---: | ---: | ---: |
+| G67-no-P2-detect | csv epoch191 | all | 0.92830 | 0.89913 | 0.93706 | 0.58208 |
+| G67-no-P2-detect | csv epoch191 | fire | 0.94065 | 0.90062 | 0.94630 | 0.58717 |
+| G67-no-P2-detect | csv epoch191 | person | 0.91595 | 0.89764 | 0.92783 | 0.57699 |
+
+结论：去掉 P2 检测头后，overall `mAP50-95` 从 C6.5 的 `0.59452` 降到 `0.58208`，说明当前 fire/person 二分类任务中 P2 检测输出仍提供有效定位收益，不宜移除。
+
 ## 七、完整指标数据
 
 ### 7.1 单模态参考基线
@@ -204,6 +235,9 @@
 | C6.5-y8n-backbone | csv epoch180/181 | all | 0.93357 | 0.88779 | 0.94046 | 0.59452 |
 | C6.5-y8n-backbone | csv epoch180/181 | fire | 0.94452 | 0.88598 | 0.94322 | 0.59961 |
 | C6.5-y8n-backbone | csv epoch180/181 | person | 0.92263 | 0.88959 | 0.93770 | 0.58943 |
+| G67-no-P2-detect | csv epoch191 | all | 0.92830 | 0.89913 | 0.93706 | 0.58208 |
+| G67-no-P2-detect | csv epoch191 | fire | 0.94065 | 0.90062 | 0.94630 | 0.58717 |
+| G67-no-P2-detect | csv epoch191 | person | 0.91595 | 0.89764 | 0.92783 | 0.57699 |
 
 ## 八、排序摘要
 
@@ -226,7 +260,8 @@
 | 13 | C4 | 0.58593 | CSPA 增容无效 |
 | 14 | C3 | 0.58466 | CSPA 增容无效 |
 | 15 | C5 | 0.58359 | CSPA 堆叠无效 |
-| 16 | F0-y8n-backbone | 0.57586 | 主链起点 |
+| 16 | G67-no-P2-detect | 0.58208 | 去掉 P2 检测头后明显低于 C6.5 |
+| 17 | F0-y8n-backbone | 0.57586 | 主链起点 |
 
 层级消融按 overall `mAP50-95` 排序：
 
@@ -245,3 +280,4 @@
 1. `C6.5` 按 epoch180/181 指标作为 YOLOv8 支线当前参考点。
 2. `C6.3/C6.4` 不再继续训练；P4/P5 融合固定为 `C6.5` 配置。
 3. 论文论证中使用同构消融失败与 `Perm-B/Perm-C` 退化作为层级匹配证据；同时说明 `Perm-A` 接近 C6.5，P2/P3 模块边界不是绝对硬约束。
+4. 去掉 P2 检测头的 G67 消融低于 C6.5，论文主模型继续保留 P2 检测输出。

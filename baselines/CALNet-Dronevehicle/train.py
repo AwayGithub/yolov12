@@ -260,7 +260,10 @@ def train_rgb_ir(hyp,  # path/to/hyp.yaml or hyp dictionary
     hyp['cls'] *= nc / 80 * 3 / nl  # scale to classes and layers
     img_scale = max(imgsz) if isinstance(imgsz, (list, tuple)) else imgsz
     hyp['obj'] *= (img_scale / 640) ** 2 * 3 / nl  # scale to image size and layers
-    hyp['theta'] *= 3 / nl
+    if hyp.get('obb', True):
+        hyp['theta'] *= 3 / nl
+    else:
+        hyp['theta'] = 0.0
     hyp['label_smoothing'] = opt.label_smoothing
     model.nc = nc  # attach number of classes to model
     model.hyp = hyp  # attach hyperparameters to model

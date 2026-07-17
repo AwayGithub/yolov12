@@ -538,6 +538,16 @@ class DualStreamDetectionModel(DetectionModel):
                 f"p2_fusion '{_p2_fusion_mode}' is not supported. "
                 "Supported values: plain, dmg, dmg_posalpha, dmg_init8d."
             )
+        _disabled_fusion_stages = self.yaml.get("disabled_fusion_stages", [])
+        if isinstance(_disabled_fusion_stages, str):
+            _disabled_fusion_stages = [s.strip() for s in _disabled_fusion_stages.split(",") if s.strip()]
+        self.disabled_fusion_stages = set(_disabled_fusion_stages)
+        _unknown_disabled_stages = self.disabled_fusion_stages - set(self.FUSION_LAYER_INDICES)
+        if _unknown_disabled_stages:
+            raise ValueError(
+                f"disabled_fusion_stages contains unsupported stages: {sorted(_unknown_disabled_stages)}. "
+                f"Supported values: {sorted(self.FUSION_LAYER_INDICES)}."
+            )
         _dmg_fusion_mode = self.yaml.get("dmg_fusion_mode", _p2_fusion_mode)
         if _dmg_fusion_mode not in {"plain", "dmg", "dmg_posalpha", "dmg_init8d"}:
             raise ValueError(
@@ -666,6 +676,22 @@ class DualStreamDetectionModel(DetectionModel):
                 f"{sorted(_overlapped_stages)}. Use one fusion innovation per stage."
             )
         self.parallel_cross_a2c2f_stages = set(_parallel_cross_stages)
+
+        _active_fusion_stages = (
+            self.dmg_fusion_stages
+            | self.freq_fusion_stages
+            | self.lif_fusion_stages
+            | self.cspa_fusion_stages
+            | self.rssqf_fusion_stages
+            | self.parallel_cross_a2c2f_stages
+        )
+        _disabled_active_stages = self.disabled_fusion_stages & _active_fusion_stages
+        if _disabled_active_stages:
+            raise ValueError(
+                "disabled_fusion_stages overlaps with active fusion innovations at "
+                f"{sorted(_disabled_active_stages)}."
+            )
+
         self._parallel_cross_layer_to_stage = {}
         for stage_name in self.parallel_cross_a2c2f_stages:
             layer_idx = self.FUSION_LAYER_INDICES[stage_name]
@@ -753,6 +779,8 @@ class DualStreamDetectionModel(DetectionModel):
 
         self.fusion_convs = nn.ModuleDict()
         for stage_name, layer_idx in self.FUSION_LAYER_INDICES.items():
+            if stage_name in self.disabled_fusion_stages:
+                continue
             c_out = self._get_layer_out_channels(self.backbone_rgb[layer_idx])
             if stage_name in self.freq_fusion_stages:
                 self.fusion_convs[stage_name] = FreDFTFusion(
@@ -827,6 +855,12 @@ class DualStreamDetectionModel(DetectionModel):
             raise ValueError(
                 f"physical_guidance_stages contains unsupported stages: {sorted(unknown_guidance_stages)}. "
                 f"Supported values: {sorted(self.FUSION_LAYER_INDICES)}."
+            )
+        disabled_guidance_stages = self.physical_guidance_stages & self.disabled_fusion_stages
+        if disabled_guidance_stages:
+            raise ValueError(
+                "physical_guidance_stages cannot target disabled fusion stages: "
+                f"{sorted(disabled_guidance_stages)}."
             )
         self.physical_guidance = nn.ModuleDict()
         for stage_name in sorted(self.physical_guidance_stages):
@@ -968,6 +1002,8 @@ class DualStreamDetectionModel(DetectionModel):
 
         fused = {}
         for stage_name in self.FUSION_LAYER_INDICES:
+            if stage_name in self.disabled_fusion_stages:
+                continue
             r, i = feats_rgb[stage_name], feats_ir[stage_name]
             fc = self.fusion_convs[stage_name]
             if isinstance(fc, M2DLocalIlluminationFusion):
@@ -993,6 +1029,8 @@ class DualStreamDetectionModel(DetectionModel):
         # 构造 y 列表供 head 使用跳连索引
         y = [None] * (max(self.FUSION_LAYER_INDICES.values()) + 1)
         for stage_name, layer_idx in self.FUSION_LAYER_INDICES.items():
+            if stage_name in self.disabled_fusion_stages:
+                continue
             y[layer_idx] = fused[stage_name]
 
         x = fused["p5"]
