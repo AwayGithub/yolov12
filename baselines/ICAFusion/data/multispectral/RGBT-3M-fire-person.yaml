@@ -1,0 +1,8 @@
+path: /data/xwh/code/yolov12/baselines/ICAFusion/data/RGBT-3M-fire-person
+train_rgb: /data/xwh/code/yolov12/baselines/ICAFusion/data/RGBT-3M-fire-person/visible/train
+val_rgb: /data/xwh/code/yolov12/baselines/ICAFusion/data/RGBT-3M-fire-person/visible/val
+train_ir: /data/xwh/code/yolov12/baselines/ICAFusion/data/RGBT-3M-fire-person/infrared/train
+val_ir: /data/xwh/code/yolov12/baselines/ICAFusion/data/RGBT-3M-fire-person/infrared/val
+
+nc: 2
+names: ['fire', 'person']
